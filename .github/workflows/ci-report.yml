@@ -121,6 +121,7 @@ jobs:
             echo "quality=$(validate_result "$DIR/quality_result")"
             echo "tests=$(validate_result "$DIR/tests_result")"
             echo "e2e=$(validate_result "$DIR/e2e_result")"
+            echo "scope_parity=$(validate_result "$DIR/scope_parity_result")"
           } >> "$GITHUB_OUTPUT"
 
       - name: Checkout (for vitest config)
@@ -215,6 +216,7 @@ jobs:
           QUALITY: ${{ steps.meta.outputs.quality }}
           TESTS: ${{ steps.meta.outputs.tests }}
           E2E: ${{ steps.meta.outputs.e2e }}
+          SCOPE_PARITY: ${{ steps.meta.outputs.scope_parity }}
           BASE_FOUND: ${{ steps.base-coverage.outputs.found }}
           BASE_DIR: ${{ steps.base-coverage.outputs.dir }}
           RUN_URL: ${{ github.event.workflow_run.html_url }}
@@ -299,7 +301,8 @@ jobs:
             case "$1" in
               success) echo "✅" ;;
               failure) echo "❌" ;;
-              cancelled) echo "⏭️" ;;
+              skipped) echo "⏭️" ;;
+              cancelled) echo "🛑" ;;
               *) echo "❓" ;;
             esac
           }
@@ -344,7 +347,13 @@ jobs:
           }
 
           # ── Overall status ──
-          if [[ "$QUALITY" == "success" && "$TESTS" == "success" && ("$E2E" == "success" || "$E2E" == "skipped") ]]; then
+          # scope-parity may also report `skipped` cleanly when the parity
+          # matrix was pruned to empty (no migrated-language source AND no
+          # shared-resolution paths changed); we accept that as a pass.
+          if [[ "$QUALITY" == "success" \
+             && "$TESTS" == "success" \
+             && ( "$E2E" == "success" || "$E2E" == "skipped" ) \
+             && ( "$SCOPE_PARITY" == "success" || "$SCOPE_PARITY" == "skipped" || "$SCOPE_PARITY" == "unknown" ) ]]; then
             OVERALL="✅ **All checks passed**"
           else
             OVERALL="❌ **Some checks failed**"
@@ -361,9 +370,10 @@ jobs:
             echo ""
             echo "| Stage | Status | Details |"
             echo "|-------|--------|---------|"
-            echo "| $(status_icon "$QUALITY") Typecheck | \`${QUALITY}\` | tsc --noEmit |"
+            echo "| $(status_icon "$QUALITY") Quality | \`${QUALITY}\` | format, lint, typecheck, convention |"
             echo "| $(status_icon "$TESTS") Tests | \`${TESTS}\` | unit tests, 3 platforms |"
             echo "| $(status_icon "$E2E") E2E | \`${E2E}\` | gitnexus-web changes only |"
+            echo "| $(status_icon "$SCOPE_PARITY") Scope parity | \`${SCOPE_PARITY}\` | RFC #909 Ring 3, per-language pruning |"
             echo ""
 
             if [ "$TOTAL" -gt 0 ] 2>/dev/null; then

@@ -128,6 +128,21 @@ jobs:
           COUNT=$(printf '%s' "$LANGS" | jq 'length')
           echo "Parity matrix entries: $COUNT ($REASON)"
 
+          # Resolver test-file existence is verified against the FULL
+          # MIGRATED_LANGUAGES set (ALL_LANGS), not just the filtered
+          # matrix. This catches a missing test file even on a docs-only
+          # PR that prunes the matrix to empty — otherwise the invariant
+          # could only fail on a PR that happens to touch the affected
+          # language. The check runs from repo root because the test
+          # paths are relative to `gitnexus/`.
+          while IFS= read -r slug; do
+            TEST_FILE="test/integration/resolvers/${slug}.test.ts"
+            if [[ ! -f "$TEST_FILE" ]]; then
+              echo "::error title=Missing resolver test::Expected gitnexus/$TEST_FILE for migrated language '$slug'. Either fix the slug, add the test file, or remove the language from MIGRATED_LANGUAGES."
+              exit 1
+            fi
+          done < <(printf '%s' "$ALL_LANGS" | jq -r '.[].slug')
+
           # Job-summary line so reviewers and agents can see which
           # languages actually ran without scraping logs.
           {
@@ -165,19 +180,11 @@ jobs:
         with:
           build: 'true'
 
-      - name: Verify resolver test file exists
-        shell: bash
-        working-directory: gitnexus
-        run: |
-          set -euo pipefail
-          TEST_FILE="test/integration/resolvers/${{ matrix.lang.slug }}.test.ts"
-          if [[ ! -f "$TEST_FILE" ]]; then
-            echo "::error title=Missing resolver test::\
-          Expected $TEST_FILE for '${{ matrix.lang.slug }}' (listed in \
-          MIGRATED_LANGUAGES). Either fix the slug or add the test file \
-          before listing this language as migrated."
-            exit 1
-          fi
+      # Resolver test-file existence is now validated up front in the
+      # `discover` job against the full MIGRATED_LANGUAGES set, so a
+      # missing file fails before any matrix runner spins up — and the
+      # invariant holds even on docs-only PRs that prune the matrix to
+      # empty.
 
       - name: Resolver tests — legacy DAG (REGISTRY_PRIMARY_${{ matrix.lang.envvar }}=0)
         shell: bash

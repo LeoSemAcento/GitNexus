@@ -63,7 +63,7 @@ jobs:
   # Reusability is detected by parsing each workflow's `on:` block, not an
   # allowlist, so new reusable workflows never produce false positives.
   workflow-convention:
-    name: Workflow concurrency convention
+    name: Workflow conventions
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -73,3 +73,15 @@ jobs:
         run: |
           set -euo pipefail
           python3 .github/scripts/check-workflow-concurrency.py .github/workflows
+      # Asserts ci.yml's per-language filter blocks AND the FULL_LANG_LIST
+      # / changed-languages defaults agree with MIGRATED_LANGUAGES in
+      # registry-primary-flag.ts. Catches the most common scope-parity
+      # drift mode: a contributor adds a language to MIGRATED_LANGUAGES
+      # but forgets to add the corresponding `<slug>:` filter block in
+      # ci.yml, which would silently make path-aware pruning skip the
+      # new language's parity entry.
+      - name: Validate per-language filter consistency
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/check-language-filters.py
