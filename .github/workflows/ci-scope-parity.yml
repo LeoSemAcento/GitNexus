@@ -21,12 +21,45 @@ name: Scope Resolution Parity
 # discovers it, runs parity, and the language's default production path
 # flips to registry-primary in the same change.
 #
-# When the set is empty (e.g. mid-Ring-3 for every language), the parity
-# matrix is skipped and the workflow reports success — no-op until a
-# language is explicitly claimed migrated.
+# ── Path-aware matrix pruning ─────────────────────────────────────────
+# `ci.yml` computes change detection ONCE per run and passes:
+#   - `shared-resolution-changed` — when 'true', shared ingestion code
+#     changed and ALL migrated languages must run (any could regress).
+#   - `changed-languages` — JSON array of language slugs whose source or
+#     resolver-test files changed (e.g. `["python","go"]`).
+#
+# The discover job intersects MIGRATED_LANGUAGES with `changed-languages`
+# unless `shared-resolution-changed=true`, in which case the full matrix
+# runs. On non-PR callers (release-candidate.yml) both inputs default to
+# the full set, so the full matrix runs there too.
+#
+# When the filtered matrix is empty, the matrix job is skipped via the
+# `if: needs.discover.outputs.languages != '[]'` guard. The outer workflow
+# conclusion stays `success` so the `ci-status` aggregator in ci.yml
+# passes the scope-parity gate.
 
 on:
   workflow_call:
+    inputs:
+      shared-resolution-changed:
+        description: >-
+          When `'true'`, shared ingestion/resolution code changed and the
+          full migrated-languages matrix must run. Conservatively defaults
+          to `'true'` so any caller that omits the input gets the full
+          battery.
+        required: false
+        type: string
+        default: 'true'
+      changed-languages:
+        description: >-
+          JSON array of migrated language slugs whose source or resolver
+          test files changed on this PR (e.g. `["python","go"]`). Used to
+          prune the parity matrix when `shared-resolution-changed` is
+          `'false'`. Defaults to the full set so omitting the input runs
+          everything.
+        required: false
+        type: string
+        default: '["python","csharp","typescript","go","c","cpp","php"]'
 
 permissions:
   contents: read
@@ -38,32 +71,85 @@ jobs:
     timeout-minutes: 5
     outputs:
       languages: ${{ steps.read.outputs.languages }}
-      has-any: ${{ steps.read.outputs.has-any }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: ./.github/actions/setup-gitnexus
 
-      - name: Extract MIGRATED_LANGUAGES from registry-primary-flag.ts
+      - name: Extract MIGRATED_LANGUAGES and filter by changed paths
         id: read
         shell: bash
         working-directory: gitnexus
+        env:
+          SHARED_CHANGED: ${{ inputs.shared-resolution-changed }}
+          CHANGED_LANGS: ${{ inputs.changed-languages }}
         run: |
           set -euo pipefail
           # `tsx` evaluates the TS source directly (no build step), imports
-          # the exported `Set`, and emits a GH-Actions-friendly JSON matrix.
-          LANGS=$(npx tsx scripts/ci-list-migrated-languages.ts)
-          COUNT=$(printf '%s' "$LANGS" | jq 'length')
-          HAS_ANY="false"
-          if [[ "$COUNT" -gt 0 ]]; then HAS_ANY="true"; fi
+          # the exported `Set`, and emits a GH-Actions-friendly JSON matrix
+          # array: [{slug, envvar}, ...].
+          ALL_LANGS=$(npx tsx scripts/ci-list-migrated-languages.ts)
+          # Validate the discovery script's output is a well-formed JSON
+          # array. A crash or schema regression here would otherwise
+          # propagate to `fromJSON('')` at matrix expansion time, where
+          # the failure surface is much harder to read.
+          if ! printf '%s' "$ALL_LANGS" | jq -e 'type == "array"' >/dev/null; then
+            echo "::error::ci-list-migrated-languages.ts produced non-array output: $ALL_LANGS"
+            exit 1
+          fi
+          ALL_COUNT=$(printf '%s' "$ALL_LANGS" | jq 'length')
+          echo "MIGRATED_LANGUAGES: $ALL_LANGS ($ALL_COUNT entries)"
+
+          # Shared-resolution change forces the full matrix — any change
+          # to shared ingestion code could regress any language's parity.
+          if [ "${SHARED_CHANGED:-true}" = "true" ]; then
+            LANGS="$ALL_LANGS"
+            REASON="shared-resolution changed → running full matrix"
+          else
+            # Validate the caller-supplied CHANGED_LANGS is a JSON array
+            # of strings. Malformed input would otherwise crash `jq
+            # --argjson` with a hard-to-diagnose parse error inside the
+            # filter pipeline.
+            if ! printf '%s' "${CHANGED_LANGS:-[]}" | jq -e 'type == "array" and all(type == "string")' >/dev/null; then
+              echo "::error::changed-languages input is not a JSON array of strings: ${CHANGED_LANGS:-<unset>}"
+              exit 1
+            fi
+            # Intersect MIGRATED_LANGUAGES with the changed-languages list.
+            # `IN(.slug; $changed[])` is strict equality membership — using
+            # `inside()` here would substring-match (`"c"` would match
+            # `"cpp"` because the `c` string is a prefix), which would
+            # over-trigger the matrix. The empty-list case is handled by
+            # the parity job's `if: != '[]'` guard.
+            LANGS=$(jq -c --argjson changed "${CHANGED_LANGS:-[]}" \
+              '[.[] | select(IN(.slug; $changed[]))]' <<< "$ALL_LANGS")
+            REASON="pruned by changed-languages: $CHANGED_LANGS"
+          fi
+
           echo "languages=$LANGS" >> "$GITHUB_OUTPUT"
-          echo "has-any=$HAS_ANY" >> "$GITHUB_OUTPUT"
-          echo "Discovered $COUNT migrated language(s): $LANGS"
-          echo "Parity matrix will run: $HAS_ANY"
+          COUNT=$(printf '%s' "$LANGS" | jq 'length')
+          echo "Parity matrix entries: $COUNT ($REASON)"
+
+          # Job-summary line so reviewers and agents can see which
+          # languages actually ran without scraping logs.
+          {
+            echo "### Scope-parity matrix"
+            echo ""
+            echo "- **Entries:** $COUNT of $ALL_COUNT migrated languages"
+            echo "- **Reason:** $REASON"
+            if [ "$COUNT" -gt 0 ]; then
+              SLUGS=$(printf '%s' "$LANGS" | jq -r 'map(.slug) | join(", ")')
+              echo "- **Slugs:** $SLUGS"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
   parity:
     name: ${{ matrix.lang.slug }} parity
     needs: discover
-    if: needs.discover.outputs.has-any == 'true'
+    # Empty-matrix guard. When the filter produced no entries, the matrix
+    # job MUST skip — `fromJSON('[]')` in `strategy.matrix` would otherwise
+    # crash with "Matrix vector does not contain any values"
+    # (community#27096). Comparing the JSON string against `'[]'` is the
+    # idiomatic, documented pattern for this guard.
+    if: needs.discover.outputs.languages != '[]'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:

@@ -25,43 +25,350 @@ concurrency:
 
 # ── Reusable workflow orchestration ─────────────────────────────────
 # Each concern lives in its own workflow file for maintainability:
-#   ci-quality.yml       — typecheck (tsc --noEmit)
+#   ci-quality.yml       — typecheck (tsc --noEmit), lint, format, workflow-convention
 #   ci-tests.yml         — unit + integration tests with coverage + cross-platform
 #   ci-e2e.yml           — E2E tests (only when gitnexus-web/ changes)
 #   ci-scope-parity.yml  — RFC #909 Ring 3 parity gate: legacy DAG + registry-primary
-#                          both pass, per migrated language in the JSON registry
+#                          both pass, per migrated language. Matrix is filtered to
+#                          only the languages whose source files changed.
 #
 # Shared setup is DRY via .github/actions/setup-gitnexus composite action.
+#
+# ── Cascading execution model ───────────────────────────────────────
+# Tier 1 (fast fail-fast):   paths-changes → quality
+# Tier 2 (gated on quality): tests, e2e, scope-parity
+# Quality failure short-circuits the expensive tier via `needs: quality` —
+# the downstream jobs auto-skip with `result == 'skipped'`. The `ci-status`
+# aggregator reports the quality failure first so the cascade reason is
+# unambiguous.
+#
+# ── Path-based change detection ─────────────────────────────────────
+# The `paths-changes` job runs `dorny/paths-filter` ONCE per CI run and
+# exposes a stable output set the reusable sub-workflows consume via
+# `with:`. Two filter steps run because `predicate-quantifier: every` is
+# required to make the `shared-resolution` negation work, but the other
+# filters need the default `some` (OR) semantics.
+#
+# For non-`pull_request` triggers (workflow_call from release-candidate),
+# there is no PR base to diff against. The job emits conservative `'true'`
+# defaults for every output so the release-candidate run keeps exercising
+# the full battery.
 
 jobs:
+  # ── Centralised change detection ────────────────────────────────
+  # outputs.web              — gitnexus-web/ or shared types changed
+  # outputs.shared-resolution — shared ingestion code (NOT under languages/) changed
+  # outputs.changed-languages — JSON array of migrated language slugs whose
+  #                              source or resolver-test files changed
+  paths-changes:
+    name: Detect changed paths
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      # dorny/paths-filter reads PR file lists via the REST API on
+      # pull_request events. Required even though the default GITHUB_TOKEN
+      # gets this scope on fork PRs automatically — explicit grant is
+      # robust to future job-level permission tightening.
+      pull-requests: read
+    outputs:
+      web: ${{ steps.compute.outputs.web }}
+      shared-resolution: ${{ steps.compute.outputs.shared-resolution }}
+      changed-languages: ${{ steps.compute.outputs.changed-languages }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      # Step 1 — shared-ingestion detection (negation-only).
+      # `predicate-quantifier: 'every'` is required for the negation
+      # (`!gitnexus/src/core/ingestion/languages/**`) to actually exclude
+      # — the default `'some'` quantifier silently ignores negation
+      # entries (dorny/paths-filter#184). This step is intentionally
+      # narrow: it is the ONLY filter that uses negation. Every other
+      # shared signal goes through Step 2's default-OR semantics where
+      # we can stack many independent patterns cleanly.
+      #
+      # `continue-on-error: true` ensures a transient GitHub REST API blip
+      # doesn't take down the whole CI run with a misleading "Quality jobs
+      # failed" message. The compute step below detects empty outputs and
+      # falls back to conservative `'true'` defaults (full battery) — the
+      # same posture as non-PR callers like release-candidate.yml.
+      - name: Detect shared-ingestion changes (negation step)
+        if: github.event_name == 'pull_request'
+        uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v3
+        id: shared-filter
+        continue-on-error: true
+        with:
+          predicate-quantifier: 'every'
+          filters: |
+            shared-ingestion:
+              - 'gitnexus/src/core/ingestion/**'
+              - '!gitnexus/src/core/ingestion/languages/**'
+
+      # Step 2 — web, per-language, and the rest of the shared surface.
+      # Default `some` (OR) quantifier — a file matching ANY pattern in
+      # the filter triggers the filter.
+      #
+      # The per-language filters include both ingestion source AND
+      # resolver integration test files so a test-only edit (e.g.,
+      # python.test.ts) still triggers Python parity. The action's
+      # built-in `changes` output is the JSON array of matched filter
+      # names — we strip the non-language filter names (web, shared-*)
+      # in the compute step to produce the language matrix input.
+      #
+      # The shared-* filters are OR'd together in the compute step to
+      # derive the `shared-resolution` output. Anything that can regress
+      # the parity matrix for ANY language — shared ingestion code,
+      # shared types, parser infrastructure, the test harness, the CI
+      # pipeline itself, or dependency/config — forces the full matrix.
+      # Per-language pruning only applies when every shared-* filter is
+      # false AND only per-language files changed.
+      - name: Detect web, shared, and per-language changes
+        if: github.event_name == 'pull_request'
+        uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v3
+        id: filter
+        continue-on-error: true
+        with:
+          filters: |
+            web:
+              - 'gitnexus-web/**'
+              - 'gitnexus-shared/**'
+            shared-types:
+              - 'gitnexus-shared/**'
+            shared-parser-infra:
+              - 'gitnexus/src/core/tree-sitter/**'
+            shared-test-harness:
+              - 'gitnexus/test/integration/resolvers/helpers.ts'
+              - 'gitnexus/test/helpers/**'
+            shared-pipeline:
+              - '.github/workflows/ci.yml'
+              - '.github/workflows/ci-quality.yml'
+              - '.github/workflows/ci-scope-parity.yml'
+              - '.github/actions/setup-gitnexus/**'
+              - 'gitnexus/scripts/ci-list-migrated-languages.ts'
+            shared-config:
+              - 'gitnexus/package.json'
+              - 'gitnexus/package-lock.json'
+              - 'gitnexus/vitest.config.ts'
+              - 'gitnexus/tsconfig.json'
+              - 'gitnexus-shared/package.json'
+              - 'gitnexus-shared/package-lock.json'
+            python:
+              - 'gitnexus/src/core/ingestion/languages/python/**'
+              - 'gitnexus/src/core/ingestion/languages/python.ts'
+              - 'gitnexus/test/integration/resolvers/python.test.ts'
+            csharp:
+              - 'gitnexus/src/core/ingestion/languages/csharp/**'
+              - 'gitnexus/src/core/ingestion/languages/csharp.ts'
+              - 'gitnexus/test/integration/resolvers/csharp.test.ts'
+            typescript:
+              - 'gitnexus/src/core/ingestion/languages/typescript/**'
+              - 'gitnexus/src/core/ingestion/languages/typescript.ts'
+              - 'gitnexus/test/integration/resolvers/typescript*.test.ts'
+            go:
+              - 'gitnexus/src/core/ingestion/languages/go/**'
+              - 'gitnexus/src/core/ingestion/languages/go.ts'
+              - 'gitnexus/test/integration/resolvers/go.test.ts'
+            c:
+              - 'gitnexus/src/core/ingestion/languages/c/**'
+              - 'gitnexus/src/core/ingestion/languages/c-cpp.ts'
+              - 'gitnexus/test/integration/resolvers/c.test.ts'
+            cpp:
+              - 'gitnexus/src/core/ingestion/languages/cpp/**'
+              - 'gitnexus/src/core/ingestion/languages/c-cpp.ts'
+              - 'gitnexus/test/integration/resolvers/cpp.test.ts'
+            php:
+              - 'gitnexus/src/core/ingestion/languages/php/**'
+              - 'gitnexus/src/core/ingestion/languages/php.ts'
+              - 'gitnexus/test/integration/resolvers/php.test.ts'
+
+      # Step 3 — derive job outputs from the two filter steps OR (for
+      # non-PR events) emit conservative defaults. release-candidate.yml
+      # calls ci.yml via `workflow_call`; without PR base/head context
+      # dorny/paths-filter has no commit range, so we short-circuit it
+      # for any non-PR event and run the full validation battery.
+      #
+      # `shared-resolution` is the OR of every "any-language-could-
+      # regress" signal:
+      #   - shared-ingestion   (Step 1, predicate-quantifier=every)
+      #   - shared-types       (gitnexus-shared/**)
+      #   - shared-parser-infra (tree-sitter loader/safe-parse)
+      #   - shared-test-harness (resolver helpers + test/helpers/**)
+      #   - shared-pipeline    (ci.yml, ci-quality.yml, ci-scope-parity.yml,
+      #                         setup-gitnexus, discovery script)
+      #   - shared-config      (gitnexus package manifests, vitest config,
+      #                         tsconfig, gitnexus-shared manifests)
+      # When any of these fire, the full migrated-languages matrix runs.
+      # Per-language pruning only applies when EVERY shared-* filter is
+      # false and only per-language files changed.
+      #
+      # Conservative-default fallback: when a filter step's `continue-on-
+      # error` fires (transient GitHub REST API blip), its outputs are
+      # unset. We detect step.outcome != 'success' and short-circuit to
+      # the full-battery posture — same as a non-PR caller. The
+      # alternative (`:-false` per-var fallback) would mask the filter
+      # failure as "nothing changed" and silently skip every downstream
+      # gate. Better to over-run on a flake than under-run.
+      - name: Compute outputs
+        id: compute
+        shell: bash
+        env:
+          IS_PR: ${{ github.event_name == 'pull_request' }}
+          WEB: ${{ steps.filter.outputs.web }}
+          # Shared signals OR'd into the final `shared-resolution` output.
+          SHARED_INGESTION: ${{ steps.shared-filter.outputs.shared-ingestion }}
+          SHARED_TYPES: ${{ steps.filter.outputs.shared-types }}
+          SHARED_PARSER_INFRA: ${{ steps.filter.outputs.shared-parser-infra }}
+          SHARED_TEST_HARNESS: ${{ steps.filter.outputs.shared-test-harness }}
+          SHARED_PIPELINE: ${{ steps.filter.outputs.shared-pipeline }}
+          SHARED_CONFIG: ${{ steps.filter.outputs.shared-config }}
+          # `changes` is dorny/paths-filter's built-in output: a JSON
+          # string-array listing every filter name that matched. We strip
+          # non-language filter names to get the per-language matrix input.
+          CHANGES: ${{ steps.filter.outputs.changes }}
+          # Step outcomes feed the fallback: if a filter step failed,
+          # treat shared-resolution as `true` and run the full matrix.
+          SHARED_FILTER_OUTCOME: ${{ steps.shared-filter.outcome }}
+          FILTER_OUTCOME: ${{ steps.filter.outcome }}
+          FULL_LANG_LIST: '["python","csharp","typescript","go","c","cpp","php"]'
+          # Non-language filter names — anything in this list is stripped
+          # from `changes` when computing `changed-languages`. Keep this
+          # set in sync with the filter definitions in Step 2 above.
+          NON_LANG_FILTERS: '["web","shared-types","shared-parser-infra","shared-test-harness","shared-pipeline","shared-config"]'
+        run: |
+          set -euo pipefail
+          if [ "$IS_PR" = "true" ]; then
+            # Filter-step failure → conservative full-battery posture.
+            if [ "$SHARED_FILTER_OUTCOME" != "success" ] || [ "$FILTER_OUTCOME" != "success" ]; then
+              echo "::warning::dorny/paths-filter failed (shared=$SHARED_FILTER_OUTCOME, filter=$FILTER_OUTCOME) — falling back to full battery"
+              {
+                echo "web=true"
+                echo "shared-resolution=true"
+                echo "changed-languages=$FULL_LANG_LIST"
+              } >> "$GITHUB_OUTPUT"
+              {
+                echo "### paths-changes — filter-step failure"
+                echo ""
+                echo "shared=\`$SHARED_FILTER_OUTCOME\`, filter=\`$FILTER_OUTCOME\` → running full battery"
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+
+            # OR the six shared signals together into the final
+            # `shared-resolution` flag. Any 'true' wins.
+            SHARED="false"
+            for v in "$SHARED_INGESTION" "$SHARED_TYPES" "$SHARED_PARSER_INFRA" \
+                     "$SHARED_TEST_HARNESS" "$SHARED_PIPELINE" "$SHARED_CONFIG"; do
+              if [ "$v" = "true" ]; then SHARED="true"; fi
+            done
+
+            # Filter the `changes` array down to language slugs only by
+            # removing non-language filter names. `jq -c` keeps the output
+            # compact so it round-trips cleanly through $GITHUB_OUTPUT and
+            # downstream `fromJSON()`.
+            CHANGED_LANGS=$(jq -c --argjson nonlang "$NON_LANG_FILTERS" \
+              '[.[] | select(IN(.; $nonlang[]) | not)]' <<< "${CHANGES:-[]}")
+            {
+              echo "web=${WEB:-true}"
+              echo "shared-resolution=$SHARED"
+              echo "changed-languages=$CHANGED_LANGS"
+            } >> "$GITHUB_OUTPUT"
+            {
+              echo "### paths-changes (pull_request)"
+              echo ""
+              echo "| Output | Value |"
+              echo "|---|---|"
+              echo "| web | ${WEB:-true} |"
+              echo "| **shared-resolution** | **$SHARED** |"
+              echo "| changed-languages | \`$CHANGED_LANGS\` |"
+              echo ""
+              echo "Shared signal sources:"
+              echo ""
+              echo "| Signal | Matched? |"
+              echo "|---|---|"
+              echo "| shared-ingestion (ingestion/ minus languages/) | ${SHARED_INGESTION:-false} |"
+              echo "| shared-types (gitnexus-shared/) | ${SHARED_TYPES:-false} |"
+              echo "| shared-parser-infra (tree-sitter/) | ${SHARED_PARSER_INFRA:-false} |"
+              echo "| shared-test-harness (test helpers) | ${SHARED_TEST_HARNESS:-false} |"
+              echo "| shared-pipeline (ci.yml + setup-gitnexus + discovery script) | ${SHARED_PIPELINE:-false} |"
+              echo "| shared-config (package.json, vitest/tsconfig) | ${SHARED_CONFIG:-false} |"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            # Conservative defaults for workflow_call / push / dispatch:
+            # run the full battery. release-candidate validates the
+            # entire codebase on every push to main regardless of diff.
+            {
+              echo "web=true"
+              echo "shared-resolution=true"
+              echo "changed-languages=$FULL_LANG_LIST"
+            } >> "$GITHUB_OUTPUT"
+            {
+              echo "### paths-changes (non-PR — full matrix)"
+              echo "Event: \`$GITHUB_EVENT_NAME\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  # ── Tier 1: cheap quality gates ─────────────────────────────────
+  # Format, lint, typecheck (gitnexus + web), and workflow-convention.
+  # Median runtime under 5 minutes — fails fast on the most common
+  # contributor mistakes (missing format, lint errors, type errors).
   quality:
+    needs: paths-changes
     uses: ./.github/workflows/ci-quality.yml
     permissions:
       contents: read
 
+  # ── Tier 2: expensive validation, gated on quality success ──────
+  # `needs: quality` makes these auto-skip when quality fails — saves
+  # ~25 minutes of Vitest matrix + ~5-15 minutes of scope-parity matrix
+  # for the most common failure mode (a contributor PR that misses
+  # format/lint/typecheck locally).
   tests:
+    needs: [paths-changes, quality]
+    if: needs.quality.result == 'success'
     uses: ./.github/workflows/ci-tests.yml
     permissions:
       contents: read
 
+  # E2E is conditionally gated on `gitnexus-web/**` changes via the
+  # `web` input. When unchanged, the inner workflow's `e2e` job skips
+  # and the outer reusable-workflow conclusion is `success` (a skipped
+  # matrix with no parity entries returns success). The `ci-status`
+  # aggregator accepts `success` OR `skipped` for the e2e gate.
   e2e:
+    needs: [paths-changes, quality]
+    if: needs.quality.result == 'success'
     uses: ./.github/workflows/ci-e2e.yml
     permissions:
       contents: read
+    with:
+      web-changed: ${{ needs.paths-changes.outputs.web }}
 
+  # Scope-parity consumes shared-resolution + changed-languages. The
+  # discovery job inside the workflow uses changed-languages to filter
+  # MIGRATED_LANGUAGES; when shared-resolution=true the full matrix runs.
   scope-parity:
+    needs: [paths-changes, quality]
+    if: needs.quality.result == 'success'
     uses: ./.github/workflows/ci-scope-parity.yml
     permissions:
       contents: read
+    with:
+      shared-resolution-changed: ${{ needs.paths-changes.outputs.shared-resolution }}
+      changed-languages: ${{ needs.paths-changes.outputs.changed-languages }}
 
   # ── Save PR metadata for the reporting workflow ─────────────────
   # The ci-report.yml workflow (triggered by workflow_run) needs the
   # PR number and job results to post a comment.  We save them as an
   # artifact because workflow_run context doesn't reliably carry PR
   # info for fork PRs.
+  #
+  # `!cancelled()` instead of `always()` so a user-initiated workflow
+  # cancellation actually cancels this job too. `always()` is documented
+  # to make a job uncancellable (actions/runner#491), which masks
+  # cancel-button presses.
   save-pr-meta:
     name: Save PR Metadata
-    if: always() && github.event_name == 'pull_request'
+    if: ${{ !cancelled() && github.event_name == 'pull_request' }}
     needs: [quality, tests, e2e, scope-parity]
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -81,16 +388,6 @@ jobs:
           echo "$TESTS"          > pr-meta/tests_result
           echo "$E2E"            > pr-meta/e2e_result
           echo "$SCOPE_PARITY"   > pr-meta/scope_parity_result
-          # TODO(post-merge): remove backward-compat copies once ci-report.yml
-          # on main reads underscore names.
-          # Backward-compat: ci-report.yml on main still reads hyphenated
-          # names.  workflow_run always executes from the default branch, so
-          # the main-branch reader won't find the underscore variants until
-          # this PR is merged.  Write both until then.
-          cp pr-meta/pr_number       pr-meta/pr-number
-          cp pr-meta/quality_result  pr-meta/quality-result
-          cp pr-meta/tests_result    pr-meta/tests-result
-          cp pr-meta/e2e_result      pr-meta/e2e-result
 
       - name: Upload PR metadata
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -100,42 +397,74 @@ jobs:
           retention-days: 1
 
   # ── Unified CI gate ──────────────────────────────────────────────
-  # Single required check for branch protection.
+  # Single required check for branch protection. This is THE check the
+  # rest of the workflow rolls up into — see emmer.dev's "Skippable
+  # GitHub Status Checks Aren't Really Required" for the rationale.
+  # The originating failure is surfaced FIRST so cascade-skipped
+  # downstream results don't produce a misleading secondary error.
+  #
+  # `!cancelled()` instead of `always()` for the same reason as
+  # save-pr-meta above — a cancel button press should cancel this too.
   ci-status:
     name: CI Gate
-    needs: [quality, tests, e2e, scope-parity]
-    if: always()
+    needs: [paths-changes, quality, tests, e2e, scope-parity]
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Check all jobs passed
         shell: bash
         env:
+          PATHS_CHANGES: ${{ needs.paths-changes.result }}
           QUALITY: ${{ needs.quality.result }}
           TESTS: ${{ needs.tests.result }}
           E2E: ${{ needs.e2e.result }}
           SCOPE_PARITY: ${{ needs.scope-parity.result }}
         run: |
+          echo "Paths-changes:  $PATHS_CHANGES"
           echo "Quality:        $QUALITY"
           echo "Tests:          $TESTS"
           echo "E2E:            $E2E"
           echo "Scope parity:   $SCOPE_PARITY"
-          if [[ "$QUALITY" != "success" ]] ||
-             [[ "$TESTS" != "success" ]]; then
-            echo "::error::Quality or test jobs failed"
+          # Walk the cascade top-down so the originating failure is the
+          # one we report. Filter steps have `continue-on-error: true`,
+          # so a transient REST API failure inside `paths-changes` does
+          # NOT take down the job — the compute step falls back to a
+          # full-battery posture and `PATHS_CHANGES=success`. The only
+          # way we see `PATHS_CHANGES != 'success'` is a genuine job-
+          # level failure (runner crash, timeout, dispatch failure).
+          if [[ "$PATHS_CHANGES" != "success" ]]; then
+            echo "::error::Path-change detection failed — downstream tiers were skipped via cascading needs"
+            exit 1
+          fi
+          # Quality is the first cheap gate. Its failure auto-skips
+          # tests/e2e/scope-parity via `needs: quality`. Those `skipped`
+          # results are an expected cascade, not a separate bug, so we
+          # check quality before the dependent jobs.
+          if [[ "$QUALITY" != "success" ]]; then
+            echo "::error::Quality jobs failed — downstream tiers were skipped via cascading needs"
+            exit 1
+          fi
+          # Tests should succeed when quality succeeded. `skipped` here
+          # only happens when an upstream `needs` failed, which the two
+          # checks above already handled — so any non-success at this
+          # point is a real test failure.
+          if [[ "$TESTS" != "success" ]]; then
+            echo "::error::Test jobs failed"
             exit 1
           fi
           if [[ "$E2E" != "success" && "$E2E" != "skipped" ]]; then
             echo "::error::E2E job failed"
             exit 1
           fi
-          # scope-parity is a reusable workflow. With an empty migrated-
-          # languages list, its parity matrix is skipped and the outer
-          # workflow still reports `success`. If any entry's legacy-DAG or
-          # registry-primary run fails, the workflow reports `failure`.
-          # Accept only `success`; `skipped` would mean the entire
-          # discover job was skipped too (upstream failure), which should
-          # still block.
+          # scope-parity is a reusable workflow. When changed-languages
+          # is empty AND shared-resolution didn't change, the parity
+          # matrix is pruned to zero but `discover` itself runs and
+          # succeeds, so the outer workflow conclusion is `success` —
+          # which this gate accepts. The only ways we'd see `skipped`
+          # here are upstream `needs` failures already caught above.
+          # If any matrix entry's legacy-DAG or registry-primary run
+          # fails, the outer workflow conclusion is `failure`.
           if [[ "$SCOPE_PARITY" != "success" ]]; then
             echo "::error::Scope-resolution parity gate failed (RFC #909 Ring 3)"
             exit 1

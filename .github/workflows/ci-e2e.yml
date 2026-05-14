@@ -2,30 +2,30 @@ name: E2E Tests
 
 on:
   workflow_call:
+    inputs:
+      web-changed:
+        description: >-
+          Whether files under `gitnexus-web/**` (or shared types in
+          `gitnexus-shared/**`) changed on this PR. Computed by the
+          centralised `paths-changes` job in `ci.yml` and passed in
+          via `with:`. When `'false'`, the e2e job skips. For non-PR
+          callers (release-candidate.yml) `paths-changes` emits `'true'`
+          conservatively so the full battery still runs.
+        required: false
+        type: string
+        default: 'true'
 
 permissions:
   contents: read
 
 jobs:
-  check-changes:
-    name: Check web module changes
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    outputs:
-      web_changed: ${{ steps.filter.outputs.web }}
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v3
-        id: filter
-        with:
-          filters: |
-            web:
-              - 'gitnexus-web/**'
-
   e2e:
     name: e2e (chromium)
-    needs: check-changes
-    if: needs.check-changes.result == 'success' && needs.check-changes.outputs.web_changed == 'true'
+    # Centralised change detection: ci.yml computes `web` ONCE and passes
+    # it here via `inputs.web-changed`. The legacy in-workflow `check-changes`
+    # job (which ran `dorny/paths-filter` on its own) is removed — the same
+    # detection now feeds every sub-workflow from a single source.
+    if: inputs.web-changed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
