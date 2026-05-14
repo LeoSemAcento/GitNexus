@@ -15,13 +15,14 @@
  *
  * ## Current boundary
  *
- * The current implementation covers class-typed arguments (value and pointer)
- * and template specializations with explicit type arguments:
+ * The current implementation covers class-typed arguments (value, pointer,
+ * and reference) and template specializations with explicit type arguments:
  *   - `audit::Event e`, `audit::Event* p`, `audit::Event** pp`
+ *   - `audit::Event& r`, `audit::Event&& rr`
  *   - `std::vector<audit::Event>` (template namespace + template-arg namespaces)
  *
- * Reference arguments, function-pointer arguments, base-class associated
- * namespaces, and the rest of the full closure are still deliberately excluded.
+ * Function-pointer arguments, base-class associated namespaces, and the rest
+ * of the full closure are still deliberately excluded.
  *
  * The current implementation also short-circuits to ADL only when ordinary lookup is empty
  * (`findCallableBindingInScope` returned undefined). ISO C++ would
@@ -61,8 +62,8 @@ import {
 
 /**
  * Per-argument shape information collected at capture time. ADL fires for
- * arguments where `simpleClassName !== ''` AND `!isReference`, including
- * class pointers whose declarator chain resolves to a named class type.
+ * arguments where `simpleClassName !== ''`, including class pointers and
+ * references whose declarator chain resolves to a named class type.
  */
 export interface CppAdlArgInfo {
   /** Simple class-like type name (last segment of qualified name); empty
@@ -163,8 +164,8 @@ export function populateCppAssociatedNamespaces(parsed: ParsedFile): void {
  *
  * Fires only when:
  *   - the call site is not in `noAdlSites` (parenthesized form), AND
- *   - at least one argument resolves to a named class type (value or
- *     pointer, but not reference, function pointer, literal, or primitive).
+ *   - at least one argument resolves to a named class type (value,
+ *     pointer, or reference; but not function pointer, literal, or primitive).
  */
 export function pickCppAdlCandidates(
   site: {
@@ -185,8 +186,6 @@ export function pickCppAdlCandidates(
   // Collect associated namespace QNames from every participating class-typed arg.
   const associatedNamespaces = new Set<string>();
   for (const arg of args) {
-    if (arg.isReference) continue;
-
     if (arg.simpleClassName !== '') {
       // For template args this may be the template name itself (e.g.
       // `vector`); simple-name lookup can match project classes with the
