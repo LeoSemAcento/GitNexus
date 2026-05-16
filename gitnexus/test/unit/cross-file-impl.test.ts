@@ -49,17 +49,34 @@ vi.mock('../../src/core/tree-sitter/parser-loader.js', async (importOriginal) =>
   };
 });
 
+// Default to non-registry-primary so existing tests (which use .ts files) are
+// not affected by the isRegistryPrimary guard added in cross-file-impl. Tests
+// that verify the skip behavior can override this with mockReturnValue(true).
+vi.mock('../../src/core/ingestion/registry-primary-flag.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import('../../src/core/ingestion/registry-primary-flag.js')
+    >();
+  return {
+    ...actual,
+    isRegistryPrimary: vi.fn(() => false),
+  };
+});
+
 import { runCrossFileBindingPropagation } from '../../src/core/ingestion/pipeline-phases/cross-file-impl.js';
 import { processCalls } from '../../src/core/ingestion/call-processor.js';
+import { isRegistryPrimary } from '../../src/core/ingestion/registry-primary-flag.js';
 import { createResolutionContext } from '../../src/core/ingestion/model/resolution-context.js';
 import { createKnowledgeGraph } from '../../src/core/graph/graph.js';
 import type { ExportedTypeMap } from '../../src/core/ingestion/call-processor.js';
 
 const processCallsMock = vi.mocked(processCalls);
+const isRegistryPrimaryMock = vi.mocked(isRegistryPrimary);
 
 describe('runCrossFileBindingPropagation', () => {
   beforeEach(() => {
     processCallsMock.mockClear();
+    isRegistryPrimaryMock.mockReturnValue(false); // reset to non-primary before each test
   });
 
   it('returns 0 immediately when namedImportMap is empty', async () => {
@@ -299,5 +316,48 @@ describe('runCrossFileBindingPropagation', () => {
     // equals MAX_CROSS_FILE_REPROCESS once the cap is hit.
     expect(result).toBe(2000);
     expect(processCallsMock).toHaveBeenCalledTimes(2000);
+  });
+
+  it('skips registry-primary language files without calling processCalls', async () => {
+    // Finding 3: on large TypeScript/C++ repos (registry-primary since v1.6.4+)
+    // cross-file-impl was calling processCalls 595× per candidate only for
+    // processCalls to immediately return (isRegistryPrimary guard inside).
+    // Now cross-file-impl filters them out BEFORE readFileContents so we avoid
+    // the I/O cost and map-building overhead entirely.
+    const graph = createKnowledgeGraph();
+    const ctx = createResolutionContext();
+
+    const exportedTypeMap: ExportedTypeMap = new Map([
+      ['upstream.ts', new Map([['User', 'User']])],
+    ]);
+    ctx.importMap.set('upstream.ts', new Set());
+
+    const allPaths = ['upstream.ts'];
+    for (let i = 0; i < 5; i++) {
+      const file = `downstream${i}.ts`;
+      allPaths.push(file);
+      const bindings = new Map();
+      bindings.set('User', { sourcePath: 'upstream.ts', exportedName: 'User' });
+      ctx.namedImportMap.set(file, bindings);
+      ctx.importMap.set(file, new Set(['upstream.ts']));
+    }
+
+    // Simulate all files being registry-primary (e.g. TypeScript on main branch).
+    isRegistryPrimaryMock.mockReturnValue(true);
+
+    const result = await runCrossFileBindingPropagation(
+      graph,
+      ctx,
+      exportedTypeMap,
+      new Set(allPaths),
+      allPaths.length,
+      '/repo',
+      Date.now(),
+      () => {},
+    );
+
+    // No files are candidates; no processCalls invocations.
+    expect(result).toBe(0);
+    expect(processCallsMock).not.toHaveBeenCalled();
   });
 });

@@ -23,6 +23,7 @@ import {
 } from 'gitnexus-shared';
 import { readFileContents } from '../filesystem-walker.js';
 import { isLanguageAvailable } from '../../tree-sitter/parser-loader.js';
+import { isRegistryPrimary } from '../registry-primary-flag.js';
 import { topologicalLevelSort } from '../utils/graph-sort.js';
 import type { KnowledgeGraph } from '../../graph/types.js';
 import { isDev } from '../utils/env.js';
@@ -136,6 +137,11 @@ export async function runCrossFileBindingPropagation(
       if (!allPathSet.has(filePath)) continue;
       const lang = getLanguageFromFilename(filePath);
       if (!lang || !isLanguageAvailable(lang)) continue;
+      // Registry-primary languages have their call resolution handled by the
+      // scope-resolution pipeline — processCalls skips them immediately. Skip
+      // here too so we avoid the I/O cost (readFileContents) and map-building
+      // overhead for files that would be no-ops anyway.
+      if (isRegistryPrimary(lang)) continue;
       totalCandidates++;
     }
     if (totalCandidates >= MAX_CROSS_FILE_REPROCESS) break;
@@ -181,6 +187,10 @@ export async function runCrossFileBindingPropagation(
 
       const lang = getLanguageFromFilename(filePath);
       if (!lang || !isLanguageAvailable(lang)) continue;
+      // Registry-primary languages have their call resolution handled by the
+      // scope-resolution pipeline — processCalls skips them immediately. Skip
+      // here to avoid readFileContents I/O and map-building for no-op files.
+      if (isRegistryPrimary(lang)) continue;
 
       levelCandidates.push({ filePath, seeded, importedReturns, importedRawReturns });
     }
