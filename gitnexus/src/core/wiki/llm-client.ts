@@ -91,7 +91,7 @@ function formatTimeoutDuration(timeoutMs: number): string {
 function isTimeoutLikeError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
   if (err.name === 'TimeoutError' || err.name === 'AbortError') return true;
-  return /timed?\s*out|abort/i.test(err.message);
+  return /time(d)?\s*out|timeout|abort/i.test(err.message);
 }
 
 /**

@@ -334,6 +334,27 @@ describe('callLLM — timeout handling', () => {
       'LLM request timed out after 1500ms. Increase --timeout or omit it to disable the per-attempt timeout.',
     );
   });
+
+  it('surfaces the same timeout message for timeout-like non-DOM errors', async () => {
+    const fetchSpy = vi
+      .fn()
+      .mockRejectedValue(new Error('request timed out while waiting for response'));
+    vi.stubGlobal('fetch', fetchSpy);
+
+    const { callLLM } = await import('../../src/core/wiki/llm-client.js');
+    await expect(
+      callLLM('test', {
+        apiKey: 'sk-test',
+        baseUrl: 'https://api.openai.com/v1',
+        model: 'gpt-4o',
+        maxTokens: 500,
+        temperature: 0,
+        requestTimeoutMs: 120_000,
+      }),
+    ).rejects.toThrow(
+      'LLM request timed out after 120s. Increase --timeout or omit it to disable the per-attempt timeout.',
+    );
+  });
 });
 
 describe('callLLM — Azure content_filter error', () => {
