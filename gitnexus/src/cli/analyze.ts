@@ -86,6 +86,7 @@ const childProcessLikelyOom = (err: unknown): boolean => {
   if (!err || typeof err !== 'object') return false;
   const e = err as { status?: unknown; signal?: unknown; stderr?: unknown; stdout?: unknown; message?: unknown };
   const statusSignalLikelyOom = e.status === 134 || e.signal === 'SIGABRT';
+  if (statusSignalLikelyOom) return true;
 
   const text = [e.message, e.stderr, e.stdout]
     .map((v) => (Buffer.isBuffer(v) ? v.toString('utf8') : typeof v === 'string' ? v : ''))
@@ -98,7 +99,7 @@ const childProcessLikelyOom = (err: unknown): boolean => {
     text.includes('allocation failed') ||
     text.includes('fatalprocessoutofmemory');
 
-  return statusSignalLikelyOom || textLikelyOom;
+  return textLikelyOom;
 };
 
 /** Re-exec the process with a 16GB heap and larger stack if we're currently below that. */
