@@ -73,6 +73,12 @@ const HEAP_FLAG = `--max-old-space-size=${HEAP_MB}`;
 const STACK_KB = 4096;
 const STACK_FLAG = `--stack-size=${STACK_KB}`;
 
+const childProcessLikelyOom = (err: unknown): boolean => {
+  if (!err || typeof err !== 'object') return false;
+  const e = err as { status?: unknown; signal?: unknown };
+  return e.status === 134 || e.signal === 'SIGABRT';
+};
+
 /** Re-exec the process with a 16GB heap and larger stack if we're currently below that. */
 function ensureHeap(): boolean {
   const nodeOpts = process.env.NODE_OPTIONS || '';
@@ -92,6 +98,15 @@ function ensureHeap(): boolean {
       env: { ...process.env, NODE_OPTIONS: `${nodeOpts} ${HEAP_FLAG}`.trim() },
     });
   } catch (e: any) {
+    if (childProcessLikelyOom(e)) {
+      cliError(
+        `  Analysis likely ran out of memory.\n` +
+          `  Retry with a larger heap if your machine allows it:\n` +
+          `    NODE_OPTIONS="--max-old-space-size=24576" gitnexus analyze ...\n` +
+          `    (Windows: set NODE_OPTIONS=--max-old-space-size=24576 && gitnexus analyze ...)\n`,
+        { recoveryHint: 'heap-oom-respawn' },
+      );
+    }
     process.exitCode = e.status ?? 1;
   }
   return true;

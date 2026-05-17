@@ -38,4 +38,24 @@ describe('analyzeCommand heap respawn', () => {
     expect(args).toContain('--max-old-space-size=16384');
     expect(opts.env.NODE_OPTIONS).toContain('--max-old-space-size=16384');
   });
+
+  it('prints heap guidance when respawned analyze exits with likely OOM', async () => {
+    delete process.env.NODE_OPTIONS;
+    getHeapStatisticsMock.mockReturnValue({ heap_size_limit: 512 * 1024 * 1024 });
+    execFileSyncMock.mockImplementationOnce(() => {
+      const err = new Error('child failed') as Error & { status?: number; signal?: string };
+      err.status = 134;
+      err.signal = 'SIGABRT';
+      throw err;
+    });
+
+    const { _captureLogger } = await import('../../src/core/logger.js');
+    const cap = _captureLogger();
+    const { analyzeCommand } = await import('../../src/cli/analyze.js');
+    await analyzeCommand(undefined, {});
+
+    expect(process.exitCode).toBe(134);
+    expect(cap.records().some((r) => r.msg.includes('Analysis likely ran out of memory.'))).toBe(true);
+    cap.restore();
+  });
 });
