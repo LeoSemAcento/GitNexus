@@ -667,6 +667,91 @@ describe('Step 2: type-binding + MRO walk', () => {
     expect(results[0]!.def).toBe(nameField);
   });
 
+  it('resolves Const members from ownedMembersByOwner through accepted-kind filtering', () => {
+    const userClass = mkDef({ nodeId: 'def:User', type: 'Class', qualifiedName: 'User' });
+    const maxConst = mkDef({
+      nodeId: 'def:User.MAX',
+      type: 'Const',
+      qualifiedName: 'User.MAX',
+      ownerId: 'def:User',
+    });
+    const readScope = mkScope({
+      id: 'scope:read',
+      parent: null,
+      typeBindings: { user: typeRef('User', 'scope:read') },
+    });
+    const ctx = makeCtx([readScope], [userClass], {
+      ownedMembersByOwner: (ownerDefId, memberName) =>
+        ownerDefId === 'def:User' && memberName === 'MAX' ? [maxConst] : [],
+    });
+
+    const results = buildFieldRegistry(ctx).lookup('MAX', 'scope:read', {
+      explicitReceiver: { name: 'user' },
+    });
+
+    expect(results).toHaveLength(1);
+    expect(results[0]!.def).toBe(maxConst);
+  });
+
+  it('falls back to defs scan when ownedMembersByOwner returns undefined', () => {
+    const userClass = mkDef({ nodeId: 'def:User', type: 'Class', qualifiedName: 'User' });
+    const maxConst = mkDef({
+      nodeId: 'def:User.MAX',
+      type: 'Const',
+      qualifiedName: 'User.MAX',
+      ownerId: 'def:User',
+    });
+    const readScope = mkScope({
+      id: 'scope:read',
+      parent: null,
+      typeBindings: { user: typeRef('User', 'scope:read') },
+    });
+    const ctx = makeCtx([readScope], [userClass, maxConst], {
+      ownedMembersByOwner: () => undefined,
+    });
+
+    const results = buildFieldRegistry(ctx).lookup('MAX', 'scope:read', {
+      explicitReceiver: { name: 'user' },
+    });
+
+    expect(results).toHaveLength(1);
+    expect(results[0]!.def).toBe(maxConst);
+  });
+
+  it('returns every hook-provided field kind that shares (owner, name)', () => {
+    const userClass = mkDef({ nodeId: 'def:User', type: 'Class', qualifiedName: 'User' });
+    const legacyProp = mkDef({
+      nodeId: 'prop:User.name',
+      type: 'Property',
+      qualifiedName: 'User.name',
+      ownerId: 'def:User',
+    });
+    const reconciledVar = mkDef({
+      nodeId: 'def:User.name',
+      type: 'Variable',
+      qualifiedName: 'User.name',
+      ownerId: 'def:User',
+    });
+    const readScope = mkScope({
+      id: 'scope:read',
+      parent: null,
+      typeBindings: { user: typeRef('User', 'scope:read') },
+    });
+    const ctx = makeCtx([readScope], [userClass], {
+      ownedMembersByOwner: (ownerDefId, memberName) =>
+        ownerDefId === 'def:User' && memberName === 'name' ? [legacyProp, reconciledVar] : [],
+    });
+
+    const results = buildFieldRegistry(ctx).lookup('name', 'scope:read', {
+      explicitReceiver: { name: 'user' },
+    });
+
+    expect(results).toHaveLength(2);
+    expect(results.map((r) => r.def.nodeId).sort()).toEqual(
+      [legacyProp.nodeId, reconciledVar.nodeId].sort(),
+    );
+  });
+
   it('emits type-binding evidence with MRO-depth-decayed weight (explicit receiver)', () => {
     const userClass = mkDef({ nodeId: 'def:User', type: 'Class', qualifiedName: 'User' });
     const saveMethod = mkDef({

@@ -157,4 +157,35 @@ describe('resolveReferenceSites', () => {
     expect(result.referenceIndex.bySourceScope.get('scope:call')).toHaveLength(1);
     expect(result.referenceIndex.bySourceScope.get('scope:call')?.[0]?.toDef).toBe('def:User.save');
   });
+
+  it('falls back to defs scan when ownedMembersByOwner returns undefined for a Const member', () => {
+    const userClass = mkDef({ nodeId: 'def:User', type: 'Class', qualifiedName: 'User' });
+    const maxConst = mkDef({
+      nodeId: 'def:User.MAX',
+      type: 'Const',
+      qualifiedName: 'User.MAX',
+      ownerId: 'def:User',
+    });
+    const scope = mkScope({
+      id: 'scope:read',
+      parent: null,
+      typeBindings: { user: typeRef('User', 'scope:read') },
+    });
+    const referenceSite: ReferenceSite = {
+      name: 'MAX',
+      atRange: range(5, 10, 5, 13),
+      inScope: 'scope:read',
+      kind: 'read',
+      explicitReceiver: { name: 'user' },
+    };
+    const indexes = makeIndexes([scope], [userClass, maxConst], [referenceSite]);
+
+    const result = resolveReferenceSites({
+      scopes: indexes,
+      ownedMembersByOwner: () => undefined,
+    });
+
+    expect(result.stats).toEqual({ sitesProcessed: 1, referencesEmitted: 1, unresolved: 0 });
+    expect(result.referenceIndex.bySourceScope.get('scope:read')?.[0]?.toDef).toBe('def:User.MAX');
+  });
 });

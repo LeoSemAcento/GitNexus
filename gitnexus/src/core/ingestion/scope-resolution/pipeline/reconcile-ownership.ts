@@ -18,8 +18,8 @@
  * undefined `ownerId` is reachable via either:
  *   - `model.methods.lookupAllByOwner(ownerId, simpleName)` — if the
  *     def is a Method / Function / Constructor, OR
- *   - `model.fields.lookupFieldByOwner(ownerId, simpleName)` — if the
- *     def is a Property / Variable.
+ *   - `model.fields.lookupAllByOwner(ownerId, simpleName)` — if the
+ *     def is a Property / Variable / Const / Static.
  *
  * This invariant is the foundation of Contract Invariant I9
  * (`contract/scope-resolver.ts`): scope-resolution passes MUST read
@@ -77,9 +77,14 @@ export function reconcileOwnership(
         }
         model.methods.register(ownerId, simple, def);
         methodsRegistered++;
-      } else if (def.type === 'Property' || def.type === 'Variable') {
-        const existing = model.fields.lookupFieldByOwner(ownerId, simple);
-        if (existing !== undefined && existing.nodeId === def.nodeId) {
+      } else if (
+        def.type === 'Property' ||
+        def.type === 'Variable' ||
+        def.type === 'Const' ||
+        def.type === 'Static'
+      ) {
+        const existing = model.fields.lookupAllByOwner(ownerId, simple);
+        if (existing.some((e) => e.nodeId === def.nodeId)) {
           skippedAlreadyPresent++;
           continue;
         }
@@ -131,9 +136,14 @@ export function validateOwnershipParity(
           );
           mismatches++;
         }
-      } else if (def.type === 'Property' || def.type === 'Variable') {
-        const found = model.fields.lookupFieldByOwner(ownerId, simple);
-        if (found === undefined || found.nodeId !== def.nodeId) {
+      } else if (
+        def.type === 'Property' ||
+        def.type === 'Variable' ||
+        def.type === 'Const' ||
+        def.type === 'Static'
+      ) {
+        const found = model.fields.lookupAllByOwner(ownerId, simple);
+        if (!found.some((d) => d.nodeId === def.nodeId)) {
           onWarn(
             `semantic-model parity: ${def.type} ${def.nodeId} (${parsed.filePath}) ` +
               `owned by ${ownerId} as "${simple}" not in FieldRegistry`,

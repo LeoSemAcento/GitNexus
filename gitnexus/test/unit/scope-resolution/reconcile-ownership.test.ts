@@ -111,6 +111,54 @@ describe('reconcileOwnership', () => {
     expect(model.fields.lookupFieldByOwner('def:User', 'tag')).toBe(attr);
   });
 
+  it('registers Const and Static owned members into FieldRegistry', () => {
+    const model = createSemanticModel();
+    const maxConst = mkProperty({
+      nodeId: 'def:User.MAX',
+      filePath: 'models.py',
+      name: 'MAX',
+      ownerId: 'def:User',
+      type: 'Const',
+    });
+    const counter = mkProperty({
+      nodeId: 'def:User.counter',
+      filePath: 'models.py',
+      name: 'counter',
+      ownerId: 'def:User',
+      type: 'Static',
+    });
+    const file = mkFile('models.py', [maxConst, counter]);
+
+    const stats = reconcileOwnership([file], model);
+
+    expect(stats.fieldsRegistered).toBe(2);
+    expect(model.fields.lookupAllByOwner('def:User', 'MAX')).toEqual([maxConst]);
+    expect(model.fields.lookupAllByOwner('def:User', 'counter')).toEqual([counter]);
+  });
+
+  it('keeps distinct field-kind defs that share (ownerId, simpleName)', () => {
+    const model = createSemanticModel();
+    const legacyProp = mkProperty({
+      nodeId: 'prop:User.name',
+      filePath: 'models.py',
+      name: 'name',
+      ownerId: 'def:User',
+      type: 'Property',
+    });
+    const reconciledVar = mkProperty({
+      nodeId: 'def:User.name',
+      filePath: 'models.py',
+      name: 'name',
+      ownerId: 'def:User',
+      type: 'Variable',
+    });
+    const file = mkFile('models.py', [legacyProp, reconciledVar]);
+
+    reconcileOwnership([file], model);
+
+    expect(model.fields.lookupAllByOwner('def:User', 'name')).toEqual([legacyProp, reconciledVar]);
+  });
+
   it('skips defs without ownerId (top-level functions)', () => {
     const model = createSemanticModel();
     const topLevel = mkMethod({

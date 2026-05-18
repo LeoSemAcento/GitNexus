@@ -344,9 +344,9 @@ export function runScopeResolution(
     providers: registryProviders,
     ownedMembersByOwner: (ownerDefId, memberName) => {
       const methods = readonlyModel.methods.lookupAllByOwner(ownerDefId, memberName);
-      const field = readonlyModel.fields.lookupFieldByOwner(ownerDefId, memberName);
-      if (field === undefined) return methods;
-      return methods.length === 0 ? [field] : [...methods, field];
+      const fields = readonlyModel.fields.lookupAllByOwner(ownerDefId, memberName);
+      if (fields.length === 0) return methods;
+      return methods.length === 0 ? fields : [...methods, ...fields];
     },
   });
   const tResolve = PROF ? process.hrtime.bigint() : 0n;

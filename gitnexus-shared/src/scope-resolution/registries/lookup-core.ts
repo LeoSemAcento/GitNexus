@@ -28,7 +28,8 @@
  *   `scope.typeBindings`), then walk the MRO via
  *   `MethodDispatchIndex.mroFor(ownerDefId)`. Membership per owner comes
  *   through an optional `RegistryContext.ownedMembersByOwner` hook when
- *   supplied, otherwise via the compatibility fallback scan over
+ *   supplied (`undefined` → fall back to `defs.byId`; `[]` → indexed
+ *   miss), otherwise via the compatibility fallback scan over
  *   `defs.byId`; each hit records a raw signal with the owner's
  *   MRO depth.
  *
@@ -264,13 +265,14 @@ function walkReceiverTypeBinding(
   // Walk the owner itself at depth 0, then its MRO chain.
   const walk: DefId[] = [ownerDefId, ...ctx.methodDispatch.mroFor(ownerDefId)];
 
-  for (let mroDepth = 0; mroDepth < walk.length; mroDepth++) {
-    const currentOwnerId = walk[mroDepth]!;
+  let mroDepth = 0;
+  for (const currentOwnerId of walk) {
     const members = collectOwnedMembers(currentOwnerId, name, ctx);
     for (const def of members) {
       if (!acceptedKinds.has(def.type)) continue;
       recordTypeBindingHit(perCandidate, def, mroDepth, ownerDefId);
     }
+    mroDepth++;
   }
 }
 

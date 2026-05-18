@@ -96,13 +96,14 @@ export interface OwnerScopedContributor {
 /**
  * Optional owner-keyed lookup hook for Step 2 receiver/MRO member walks.
  * Callers with per-owner registries can supply this to avoid full-definition
- * scans for each `(ownerDefId, memberName)` probe. Return an empty array on
- * miss.
+ * scans for each `(ownerDefId, memberName)` probe. Return `undefined` when
+ * the hook does not index that owner/name (Step 2 falls back to `defs`).
+ * Return `[]` only for an authoritative indexed miss.
  */
 export type OwnedMembersByOwnerLookup = (
   ownerDefId: DefId,
   memberName: string,
-) => readonly SymbolDefinition[];
+) => readonly SymbolDefinition[] | undefined;
 
 // ─── Top-level context threaded through every lookup ───────────────────────
 

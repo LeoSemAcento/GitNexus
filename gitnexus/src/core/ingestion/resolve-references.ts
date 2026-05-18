@@ -194,7 +194,10 @@ function lookupForSite(
     case 'write': {
       // Try field first; fall through to method then class so bare-name
       // reads of a function (e.g. `cb = save`) still resolve.
-      const fieldHits = fieldRegistry.lookup(site.name, site.inScope);
+      const fieldOpts: Parameters<FieldRegistry['lookup']>[2] = {
+        ...(site.explicitReceiver !== undefined ? { explicitReceiver: site.explicitReceiver } : {}),
+      };
+      const fieldHits = fieldRegistry.lookup(site.name, site.inScope, fieldOpts);
       if (fieldHits.length > 0) return fieldHits;
       const methodHits = methodRegistry.lookup(site.name, site.inScope);
       if (methodHits.length > 0) return methodHits;
