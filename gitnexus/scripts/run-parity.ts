@@ -20,6 +20,7 @@
  */
 
 import { execFileSync } from 'child_process';
+import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { MIGRATED_LANGUAGES } from '../src/core/ingestion/registry-primary-flag.js';
@@ -49,6 +50,7 @@ function runVitest(testFile: string, env: Record<string, string>): { ok: boolean
       env: { ...process.env, ...env },
       encoding: 'utf-8',
       stdio: ['pipe', 'pipe', 'pipe'],
+      shell: true,
       // Keep per-invocation timeout well under the CI job timeout (25 min)
       // so the summary always prints even when a language hangs.
       timeout: 60 * 1000,
@@ -79,7 +81,6 @@ const missingFiles: string[] = [];
 for (const lang of languages) {
   const file = path.resolve(ROOT, testFilePath(lang));
   try {
-    const fs = await import('fs');
     fs.accessSync(file);
   } catch {
     missingFiles.push(`${testFilePath(lang)} (${lang})`);

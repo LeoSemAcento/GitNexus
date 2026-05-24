@@ -34,9 +34,10 @@ try {
     cwd: ROOT,
     stdio: 'inherit',
     timeout: 15 * 60 * 1000,
+    shell: true,
   });
 } catch (err: any) {
-  if (err.code === 'ETIMEDOUT' || err.signal) {
+  if (err.killed || err.signal) {
     console.error('vitest timed out after 15 minutes');
   }
   process.exit(1);
