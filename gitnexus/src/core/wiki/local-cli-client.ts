@@ -19,6 +19,7 @@ export type LocalAgentProvider = 'claude' | 'codex';
 export interface LocalCLIConfig {
   model?: string;
   workingDirectory?: string;
+  requestTimeoutMs?: number;
 }
 
 const COMMANDS: Record<LocalAgentProvider, string> = {
@@ -62,6 +63,7 @@ export function resolveLocalCLIConfig(overrides?: Partial<LocalCLIConfig>): Loca
   return {
     model: overrides?.model,
     workingDirectory: overrides?.workingDirectory,
+    requestTimeoutMs: overrides?.requestTimeoutMs,
   };
 }
 
@@ -156,6 +158,7 @@ function runLocalCLI(
     const child = spawn(commandInfo.command, finalArgs, {
       cwd: config.workingDirectory || process.cwd(),
       stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
       env: {
         ...process.env,
         CI: '1',
@@ -168,18 +171,37 @@ function runLocalCLI(
     let stderr = '';
     let stdinError: Error | undefined;
     let settled = false;
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
 
     const rejectOnce = (error: Error) => {
       if (settled) return;
       settled = true;
+      if (killTimer !== undefined) clearTimeout(killTimer);
       reject(error);
     };
 
     const resolveOnce = (response: LLMResponse) => {
       if (settled) return;
       settled = true;
+      if (killTimer !== undefined) clearTimeout(killTimer);
       resolve(response);
     };
+
+    if (config.requestTimeoutMs !== undefined && config.requestTimeoutMs > 0) {
+      killTimer = setTimeout(() => {
+        child.kill();
+        const duration =
+          config.requestTimeoutMs! >= 60_000
+            ? `${Math.round(config.requestTimeoutMs! / 60_000)}m`
+            : `${Math.round(config.requestTimeoutMs! / 1_000)}s`;
+        rejectOnce(
+          new Error(
+            `${provider} CLI timed out after ${duration}. ` +
+              'Increase --timeout or omit it to disable the request timeout.',
+          ),
+        );
+      }, config.requestTimeoutMs);
+    }
 
     child.stdout.on('data', (chunk: Buffer) => {
       const chunkStr = chunk.toString();
@@ -212,7 +234,12 @@ function runLocalCLI(
         rejectOnce(new Error(`${provider} CLI stdin error: ${stdinError.message}`));
         return;
       }
-      resolveOnce({ content: stdout.trim() });
+      const output = stdout.trim();
+      if (!output) {
+        rejectOnce(new Error(`${provider} CLI returned empty output`));
+        return;
+      }
+      resolveOnce({ content: output });
     });
 
     child.on('error', (err) => {

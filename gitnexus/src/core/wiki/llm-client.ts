@@ -79,7 +79,7 @@ export async function resolveLLMConfig(overrides?: Partial<LLMConfig>): Promise<
       'https://openrouter.ai/api/v1',
     model:
       overrides?.model ||
-      process.env.GITNEXUS_MODEL ||
+      (localProvider ? undefined : process.env.GITNEXUS_MODEL) ||
       savedLocalModel ||
       (localProvider ? '' : savedConfig.model || 'minimax/minimax-m2.5'),
     maxTokens: overrides?.maxTokens ?? 16_384,

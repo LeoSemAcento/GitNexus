@@ -222,6 +222,7 @@ export class WikiGenerator {
       const localConfig = resolveLocalCLIConfig({
         model: this.llmConfig.model,
         workingDirectory: this.repoPath,
+        requestTimeoutMs: this.llmConfig.requestTimeoutMs,
       });
       return this.llmConfig.provider === 'claude'
         ? callClaudeLLM(prompt, localConfig, systemPrompt, options)
