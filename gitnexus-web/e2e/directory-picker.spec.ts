@@ -265,7 +265,12 @@ test.describe('Directory picker — selection', () => {
     });
 
     // Click the backdrop to close
-    await page.locator('[data-testid="directory-picker-modal"]').locator('..').locator('div').first().click({ position: { x: 5, y: 5 }, force: true });
+    await page
+      .locator('[data-testid="directory-picker-modal"]')
+      .locator('..')
+      .locator('div')
+      .first()
+      .click({ position: { x: 5, y: 5 }, force: true });
 
     // Path input should keep the original value
     await expect(pathInput).toHaveValue('/my/custom/path');

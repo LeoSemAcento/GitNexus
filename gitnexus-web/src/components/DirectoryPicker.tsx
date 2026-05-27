@@ -137,7 +137,10 @@ export const DirectoryPicker = ({ open, onClose, onSelect, initialDir }: Directo
         </nav>
 
         {/* Directory listing */}
-        <div data-testid="directory-listing" className="min-h-[200px] flex-1 overflow-y-auto px-2 py-2">
+        <div
+          data-testid="directory-listing"
+          className="min-h-[200px] flex-1 overflow-y-auto px-2 py-2"
+        >
           {loading && (
             <div className="flex items-center justify-center py-12" role="status">
               <Loader2 className="h-5 w-5 animate-spin text-text-muted" />
@@ -176,13 +179,16 @@ export const DirectoryPicker = ({ open, onClose, onSelect, initialDir }: Directo
                   key={entry.name}
                   data-testid={`dir-entry-${entry.name}`}
                   onClick={() => navigateTo(target)}
-                  className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2.5 text-left transition-colors hover:bg-hover active:bg-hover/70 focus-visible:ring-2 focus-visible:ring-accent/40 focus-visible:outline-none"
+                  className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2.5 text-left transition-colors hover:bg-hover focus-visible:ring-2 focus-visible:ring-accent/40 focus-visible:outline-none active:bg-hover/70"
                 >
                   <Folder className="h-4 w-4 shrink-0 text-accent/70" />
                   <span className="truncate font-mono text-xs text-text-secondary">
                     {entry.name}
                   </span>
-                  <ChevronRight className="ml-auto h-3 w-3 shrink-0 text-text-muted/40" aria-hidden="true" />
+                  <ChevronRight
+                    className="ml-auto h-3 w-3 shrink-0 text-text-muted/40"
+                    aria-hidden="true"
+                  />
                 </button>
               );
             })}
@@ -190,13 +196,16 @@ export const DirectoryPicker = ({ open, onClose, onSelect, initialDir }: Directo
 
         {/* Footer — current path + select button */}
         <div className="flex items-center gap-3 border-t border-border-subtle bg-elevated/30 px-5 py-3">
-          <code data-testid="directory-picker-path" className="min-w-0 flex-1 truncate rounded bg-void px-2.5 py-1.5 font-mono text-xs text-text-secondary">
+          <code
+            data-testid="directory-picker-path"
+            className="min-w-0 flex-1 truncate rounded bg-void px-2.5 py-1.5 font-mono text-xs text-text-secondary"
+          >
             {currentDir}
           </code>
           <button
             data-testid="directory-picker-select"
             onClick={() => onSelect(currentDir)}
-            className="flex shrink-0 items-center gap-1.5 rounded-lg bg-accent px-3.5 py-2 text-xs font-medium text-white transition-colors hover:bg-accent/90 active:bg-accent/80 focus-visible:ring-2 focus-visible:ring-accent/40 focus-visible:ring-offset-2 focus-visible:ring-offset-surface focus-visible:outline-none"
+            className="flex shrink-0 items-center gap-1.5 rounded-lg bg-accent px-3.5 py-2 text-xs font-medium text-white transition-colors hover:bg-accent/90 focus-visible:ring-2 focus-visible:ring-accent/40 focus-visible:ring-offset-2 focus-visible:ring-offset-surface focus-visible:outline-none active:bg-accent/80"
           >
             <Check className="h-3.5 w-3.5" />
             {t('repoAnalyzer.directoryPicker.select')}
