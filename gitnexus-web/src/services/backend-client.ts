@@ -755,6 +755,23 @@ export const fetchClusterDetail = async (repo: string, name: string): Promise<un
   return response.json();
 };
 
+// ── Filesystem API ───────────────────────────────────────────────────────
+
+export interface DirEntry {
+  name: string;
+}
+
+/** List subdirectories at the given absolute server-side path. */
+export const listDirectories = async (dir: string): Promise<{ entries: DirEntry[] }> => {
+  const response = await fetchWithTimeout(
+    `${_backendUrl}/api/fs/list?dir=${encodeURIComponent(dir)}`,
+    undefined,
+    5_000,
+  );
+  await assertOk(response);
+  return response.json() as Promise<{ entries: DirEntry[] }>;
+};
+
 // ── Analyze API ────────────────────────────────────────────────────────────
 
 /** Start a server-side analysis job. */

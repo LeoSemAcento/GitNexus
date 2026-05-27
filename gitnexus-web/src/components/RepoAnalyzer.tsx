@@ -24,6 +24,7 @@ import {
   type JobProgress,
 } from '../services/backend-client';
 import { AnalyzeProgress } from './AnalyzeProgress';
+import { DirectoryPicker } from './DirectoryPicker';
 import { useTranslation } from 'react-i18next';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -165,8 +166,8 @@ export interface RepoAnalyzerProps {
 export const RepoAnalyzer = ({ variant, onComplete, onCancel }: RepoAnalyzerProps) => {
   const { t } = useTranslation(['common', 'errors', 'onboarding']);
   const inputId = useId();
-  const folderInputRef = useRef<HTMLInputElement>(null);
   const [mode, setMode] = useState<InputMode>('github');
+  const [pickerOpen, setPickerOpen] = useState(false);
   const [githubUrl, setGithubUrl] = useState('');
   const [gitlabUrl, setGitlabUrl] = useState('');
   const [localPath, setLocalPath] = useState('');
@@ -443,35 +444,24 @@ export const RepoAnalyzer = ({ variant, onComplete, onCancel }: RepoAnalyzerProp
               <Check className="h-3.5 w-3.5 shrink-0 text-emerald-400" />
             )}
           </div>
-          {/* Native folder picker + Browse button — below the input */}
-          <input
-            ref={folderInputRef}
-            type="file"
-            // @ts-expect-error -- webkitdirectory is non-standard but widely supported
-            webkitdirectory=""
-            className="hidden"
-            onChange={(e) => {
-              const files = e.target.files;
-              if (files && files.length > 0) {
-                const rel = files[0].webkitRelativePath;
-                const folderName = rel.split('/')[0];
-                if (folderName) {
-                  setLocalPath(folderName);
-                  setValidationError(null);
-                }
-              }
-              e.target.value = '';
-            }}
-          />
           <button
             type="button"
-            onClick={() => folderInputRef.current?.click()}
+            onClick={() => setPickerOpen(true)}
             disabled={isLoading}
             className="flex w-full cursor-pointer items-center justify-center gap-2 rounded-lg border border-border-subtle bg-elevated px-3 py-2 text-xs font-medium text-text-secondary transition-all duration-150 hover:bg-hover hover:text-text-primary disabled:opacity-50"
           >
             <FolderOpen className="h-3.5 w-3.5" />
             {t('onboarding:repoAnalyzer.browseForFolder')}
           </button>
+          <DirectoryPicker
+            open={pickerOpen}
+            onClose={() => setPickerOpen(false)}
+            onSelect={(selectedPath) => {
+              setLocalPath(selectedPath);
+              setPickerOpen(false);
+              setValidationError(null);
+            }}
+          />
         </div>
       )}
 

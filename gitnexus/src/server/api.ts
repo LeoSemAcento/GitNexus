@@ -549,6 +549,63 @@ const requestedRepo = (req: express.Request): string | undefined => {
 };
 
 /**
+ * Handle a GET /api/fs/list request. Lists subdirectories at a given
+ * absolute path. Extracted for unit testing (same rationale as
+ * handleFileRequest — avoids CodeQL js/missing-rate-limiting false
+ * positives in tests).
+ */
+export const handleFsListRequest = async (
+  req: { query: any },
+  res: {
+    status: (code: number) => { json: (body: any) => void };
+    json: (body: any) => void;
+  },
+): Promise<void> => {
+  try {
+    const raw = req.query.dir ?? '/';
+    const dir = assertString(raw, 'dir');
+
+    if (!path.isAbsolute(dir)) {
+      res.status(400).json({ error: '"dir" must be an absolute path' });
+      return;
+    }
+    if (path.normalize(dir) !== path.resolve(dir)) {
+      res.status(400).json({ error: '"dir" must not contain traversal sequences' });
+      return;
+    }
+
+    let dirents;
+    try {
+      dirents = await fs.readdir(dir, { withFileTypes: true });
+    } catch (err: unknown) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'ENOTDIR') {
+        res.status(404).json({ error: 'Directory not found' });
+        return;
+      }
+      if (code === 'EACCES' || code === 'EPERM') {
+        res.status(403).json({ error: 'Permission denied' });
+        return;
+      }
+      throw err;
+    }
+
+    const entries = dirents
+      .filter((d) => d.isDirectory())
+      .map((d) => ({ name: d.name }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+
+    res.json({ entries });
+  } catch (err: unknown) {
+    if (err instanceof BadRequestError) {
+      res.status(err.status).json({ error: err.message });
+      return;
+    }
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+/**
  * Handle a GET /api/file request body. Extracted from createServer's route
  * registration so it can be unit-tested without spinning up an HTTP server
  * — calling app.get(...) inside a test triggers CodeQL's
@@ -1249,6 +1306,8 @@ export const createServer = async (port: number, host: string = '127.0.0.1') => 
     }
     await handleFileRequest(req, res, entry.path);
   });
+
+  app.get('/api/fs/list', createRouteLimiter(), (req, res) => handleFsListRequest(req, res));
 
   // Grep — regex search across file contents in the indexed repo
   // Uses filesystem-based search for memory efficiency (never loads all files into memory)

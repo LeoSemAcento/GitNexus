@@ -61,7 +61,13 @@
     "gitlabRepositoryUrl": "GitLab Repository URL",
     "gitlabSupported": "Supports GitLab.com and self-hosted GitLab instances.",
     "localFolderPath": "Local Folder Path",
-    "browseForFolder": "Browse for folder",
-    "hideBackground": "Hide (analysis continues in background)"
+    "browseForFolder": "Browse server directories",
+    "hideBackground": "Hide (analysis continues in background)",
+    "directoryPicker": {
+      "title": "Browse Server Directories",
+      "select": "Select this folder",
+      "empty": "This directory is empty.",
+      "goBack": "Go back"
+    }
   }
 }
