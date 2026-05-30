@@ -154,9 +154,19 @@ function resolveGoldenAction(opts: {
 describe('Go scope captures — golden parity', () => {
   it('matches the committed golden snapshot across all go-* fixtures + DAO shape', () => {
     const snapshot = buildSnapshot();
+
+    // Read the golden once (no existsSync-then-use, which is a TOCTOU race):
+    // ENOENT means the golden is missing; reuse `existing` for the compare path.
+    let existing: string | undefined;
+    try {
+      existing = fs.readFileSync(GOLDEN_FILE, 'utf8');
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
+
     const action = resolveGoldenAction({
       update: UPDATE,
-      exists: fs.existsSync(GOLDEN_FILE),
+      exists: existing !== undefined,
       isCI: !!process.env.CI, // truthy check: fires on any CI runner, not just CI==='true'
     });
 
@@ -176,7 +186,7 @@ describe('Go scope captures — golden parity', () => {
       return;
     }
 
-    const expected: Snapshot = JSON.parse(fs.readFileSync(GOLDEN_FILE, 'utf8'));
+    const expected: Snapshot = JSON.parse(existing!);
     expect(
       snapshot,
       'emitGoScopeCaptures output drifted from the committed golden. If this drift is intentional ' +
@@ -192,9 +202,12 @@ describe('Go scope captures — golden parity', () => {
     { update: false, exists: false, isCI: false, expected: 'regenerate' },
     { update: false, exists: true, isCI: true, expected: 'compare' },
     { update: false, exists: true, isCI: false, expected: 'compare' },
-  ])('resolveGoldenAction($update,$exists,$isCI) -> $expected', ({ update, exists, isCI, expected }) => {
-    expect(resolveGoldenAction({ update, exists, isCI })).toBe(expected);
-  });
+  ])(
+    'resolveGoldenAction($update,$exists,$isCI) -> $expected',
+    ({ update, exists, isCI, expected }) => {
+      expect(resolveGoldenAction({ update, exists, isCI })).toBe(expected);
+    },
+  );
 
   it('produces a deterministic digest across repeated runs', () => {
     const src = generateDao(8);
