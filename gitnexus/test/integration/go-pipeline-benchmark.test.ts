@@ -438,7 +438,7 @@ describe('Go scope-capture O(n^2) regression tripwire', () => {
 
   it('parses a 400-struct file in well under the O(n^2) tripwire budget', () => {
     const STRUCT_COUNT = 400;
-    const BUDGET_MS = 10_000; // coarse: ~40x the fixed path, ~3x under a quadratic regression
+    const BUDGET_MS = 5_000; // coarse: ~20x the fixed path (~250ms), trips a ~20x regression; a quadratic regression at 400 structs is ~25s
     const src = generateGoStructSource(STRUCT_COUNT);
 
     emitGoScopeCaptures(src, 'tripwire-warmup.go'); // warm up the parser/query JIT
