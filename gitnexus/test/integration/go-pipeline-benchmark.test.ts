@@ -33,6 +33,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runPipelineFromRepo } from '../../src/core/ingestion/pipeline.js';
+import { emitGoScopeCaptures } from '../../src/core/ingestion/languages/go/index.js';
 
 const BENCH_ENABLED = process.env.GITNEXUS_BENCH === '1';
 
@@ -182,16 +183,20 @@ async function runBenchmark(
     if (heap > peakHeapMB) peakHeapMB = heap;
   }, 50);
 
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
   try {
     const start = Date.now();
     const result = await Promise.race([
       runPipelineFromRepo(dir, () => {}, { skipGraphPhases: true }),
-      new Promise<never>((_, reject) =>
-        setTimeout(
+      new Promise<never>((_, reject) => {
+        // Hold the handle so the winning (pipeline) path can cancel it in the
+        // finally — otherwise the timer lingers for up to budgetMs and its
+        // late rejection surfaces as an unhandled promise rejection.
+        timeoutHandle = setTimeout(
           () => reject(new Error(`Pipeline exceeded ${budgetMs}ms at ${fileCount} files`)),
           budgetMs,
-        ),
-      ),
+        );
+      }),
     ]);
     const elapsedMs = Date.now() - start;
 
@@ -205,6 +210,7 @@ async function runBenchmark(
       edgeCount: result.graph.relationshipCount,
     };
   } finally {
+    if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
     clearInterval(heapSampler);
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -307,7 +313,13 @@ describe.skipIf(!BENCH_ENABLED)('Go pipeline benchmark', () => {
     for (let i = 1; i < results.length; i++) {
       const fileRatio = results[i].fileCount / results[i - 1].fileCount;
       const timeRatio = results[i].elapsedMs / results[i - 1].elapsedMs;
-      expect(timeRatio / fileRatio).toBeLessThan(3);
+      // The scale steps are 2.5x (100->250) and 2x (250->500). A quadratic
+      // regression makes timeRatio ~= fileRatio^2, i.e. timeRatio/fileRatio ~=
+      // fileRatio (2.5 and 2.0) — which a `< 3` bound would wave through. The
+      // O(n) path keeps this ratio ~1 (measured 0.44 and 0.75 post-fix), so a
+      // `< 1.5` bound (the printResults "linear" boundary) actually fails on a
+      // re-regression to O(n^2) while leaving comfortable headroom for linear.
+      expect(timeRatio / fileRatio).toBeLessThan(1.5);
     }
   }, 300_000);
 });
@@ -334,11 +346,11 @@ describe.skipIf(!BENCH_ENABLED || !DIST_WORKER_AVAILABLE)(
       const { dir, bigFileBytes, fileCount } = generateGoQuarantineFixture(entityCount, 14);
 
       // Sub-batch knobs that force fine chunking onto the worker (env-only —
-      // there is no PipelineOptions field for these two).
+      // there is no PipelineOptions field for these two). Capture the prior
+      // values before the try; set them as the first statements INSIDE it so
+      // the finally's restore covers every path that mutated the process env.
       const prevMaxBytes = process.env.GITNEXUS_WORKER_SUB_BATCH_MAX_BYTES;
       const prevTimeout = process.env.GITNEXUS_WORKER_SUB_BATCH_TIMEOUT_MS;
-      process.env.GITNEXUS_WORKER_SUB_BATCH_MAX_BYTES = '262144';
-      process.env.GITNEXUS_WORKER_SUB_BATCH_TIMEOUT_MS = String(subBatchTimeoutMs);
 
       let peakHeapMB = 0;
       const heapSampler = setInterval(() => {
@@ -347,6 +359,8 @@ describe.skipIf(!BENCH_ENABLED || !DIST_WORKER_AVAILABLE)(
       }, 50);
 
       try {
+        process.env.GITNEXUS_WORKER_SUB_BATCH_MAX_BYTES = '262144';
+        process.env.GITNEXUS_WORKER_SUB_BATCH_TIMEOUT_MS = String(subBatchTimeoutMs);
         const start = Date.now();
         const result = await runPipelineFromRepo(dir, () => {}, {
           skipGraphPhases: true,
@@ -390,3 +404,53 @@ describe.skipIf(!BENCH_ENABLED || !DIST_WORKER_AVAILABLE)(
     }, 360_000);
   },
 );
+
+/**
+ * Unlike the two suites above, this one is NOT gated behind GITNEXUS_BENCH and
+ * needs no compiled worker — so it runs in normal CI and is the actual guard
+ * against an O(n^2) re-regression of emitGoScopeCaptures (issue #1848). It calls
+ * the hotpath directly on a ~400-struct generated source. The O(n) path does
+ * this in a few hundred ms; the old findNodeAtRange-from-root behaviour took
+ * ~25s+ at this size. The budget is a coarse tripwire (huge margin over the
+ * fixed path, far below a quadratic regression), not a microbenchmark — keep it
+ * generous so it never flakes on a loaded CI runner.
+ */
+describe('Go scope-capture O(n^2) regression tripwire', () => {
+  function generateGoStructSource(structCount: number): string {
+    const lines = ['package generated', ''];
+    for (let i = 0; i < structCount; i++) {
+      const n = String(i).padStart(4, '0');
+      lines.push(
+        `type Item${n} struct {`,
+        '\tid int64',
+        '\tname string',
+        '}',
+        '',
+        `func (d *Item${n}) GetID() int64 { return d.id }`,
+        `func (d *Item${n}) SetID(id int64) { d.id = id }`,
+        `func (d *Item${n}) GetName() string { return d.name }`,
+        `func (d *Item${n}) Validate() error { return nil }`,
+        '',
+      );
+    }
+    return lines.join('\n');
+  }
+
+  it('parses a 400-struct file in well under the O(n^2) tripwire budget', () => {
+    const STRUCT_COUNT = 400;
+    const BUDGET_MS = 10_000; // coarse: ~40x the fixed path, ~3x under a quadratic regression
+    const src = generateGoStructSource(STRUCT_COUNT);
+
+    emitGoScopeCaptures(src, 'tripwire-warmup.go'); // warm up the parser/query JIT
+
+    const start = Date.now();
+    const matches = emitGoScopeCaptures(src, 'tripwire.go');
+    const elapsedMs = Date.now() - start;
+
+    // Sanity: the captures are actually produced (each struct + 4 methods emits
+    // far more than 10 capture groups), so a fast-but-empty result can't pass.
+    expect(matches.length).toBeGreaterThan(STRUCT_COUNT * 10);
+    // The actual regression guard: a re-regression to O(n^2) blows this budget.
+    expect(elapsedMs).toBeLessThan(BUDGET_MS);
+  }, 30_000);
+});

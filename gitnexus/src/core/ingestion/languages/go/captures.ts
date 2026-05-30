@@ -203,10 +203,13 @@ function isRawMultiAssignTypeBinding(nodeMap: Record<string, SyntaxNode>): boole
     nodeMap['@type-binding.assertion'];
   if (anchor === undefined) return false;
 
-  // Original looked up a short_var_declaration at the anchor's range; these
-  // tags are captured directly on the short_var_declaration (except the
-  // var_declaration form of @type-binding.assertion, which the old range+type
-  // lookup would have missed -> null -> false).
+  // These tags are captured directly ON the short_var_declaration, so the
+  // captured node IS what the original findNodeAtRange(root, range,
+  // 'short_var_declaration') re-derived. The var_declaration (var-form)
+  // variants — @type-binding.assertion (`var x = e.(T)`) and
+  // @type-binding.call-return (`var x = Func()`) — anchor on a var_declaration
+  // instead; the old range+type lookup found no short_var_declaration at that
+  // range and returned null -> false, which this type guard reproduces exactly.
   if (anchor.type !== 'short_var_declaration') return false;
   const node = anchor;
   const lhs = node.childForFieldName('left');
