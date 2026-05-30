@@ -14,8 +14,11 @@
  *
  * Per fixture the snapshot stores `{ captureGroups, digest }`:
  *   - captureGroups: number of capture matches (makes a count change legible)
- *   - digest: sha256 of a match-grouped, order-independent canonicalization
- *     (see canonicalize* below). Nothing path/time/id-dependent leaks in.
+ *   - digest: sha256 of a match-grouped, order-sensitive (emission-order)
+ *     canonicalization (see canonicalize* below). Order-sensitivity is safe
+ *     because emitGoScopeCaptures output is deterministic, and it makes the
+ *     digest a true byte-identical guard (a reordering refactor is real drift).
+ *     Nothing path/time/id-dependent leaks in.
  *
  * Pattern: mirrors test/integration/pipeline-graph-golden.test.ts.
  */
@@ -58,9 +61,12 @@ function canonicalizeMatch(match: CaptureMatch): string {
   return parts.join(';');
 }
 
-/** Order-independent digest of a full capture result (match-grouped). */
+/** Order-sensitive (emission-order) digest of a full capture result (match-grouped). */
 function digestCaptures(matches: readonly CaptureMatch[]): string {
-  const matchStrings = matches.map(canonicalizeMatch).sort();
+  // No cross-match sort: the digest reflects emission order so a reordering
+  // refactor surfaces as drift. Within-match key order IS normalized
+  // (canonicalizeMatch sorts), since a CaptureMatch is an unordered Record.
+  const matchStrings = matches.map(canonicalizeMatch);
   return crypto.createHash('sha256').update(matchStrings.join('\n')).digest('hex');
 }
 
@@ -197,10 +203,12 @@ describe('Go scope captures — golden parity', () => {
     );
   });
 
-  it('digest is independent of capture-match array order', () => {
+  it('digest is sensitive to capture-match emission order', () => {
     const matches = emitGoScopeCaptures(generateDao(6), 'a.go');
+    expect(matches.length).toBeGreaterThan(1);
     const reversed = [...matches].reverse();
-    expect(digestCaptures(reversed)).toBe(digestCaptures(matches));
+    // Reordering the emission changes the digest — the true byte-identical guard.
+    expect(digestCaptures(reversed)).not.toBe(digestCaptures(matches));
   });
 
   it('records a capture-group count for every fixture and the DAO shape', () => {
