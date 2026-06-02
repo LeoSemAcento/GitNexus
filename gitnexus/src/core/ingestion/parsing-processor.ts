@@ -297,10 +297,16 @@ const cachedFindEnclosingClassInfo = (
   node: SyntaxNode,
   filePath: string,
   resolveEnclosingOwner?: (node: SyntaxNode) => SyntaxNode | null,
+  getQualifiedOwnerName?: (node: SyntaxNode, simpleName: string) => string | null,
 ): EnclosingClassInfo | null => {
   const cached = classInfoCache.get(node);
   if (cached !== undefined) return cached;
-  const result = findEnclosingClassInfo(node, filePath, resolveEnclosingOwner);
+  const result = findEnclosingClassInfo(
+    node,
+    filePath,
+    resolveEnclosingOwner,
+    getQualifiedOwnerName,
+  );
   classInfoCache.set(node, result);
   return result;
 };
@@ -602,24 +608,55 @@ const processParsingSequential = async (
         nodeLabel === 'Constructor' ||
         nodeLabel === 'Property' ||
         nodeLabel === 'Function';
+      // #1978: when the language opts into qualified node ids, thread the
+      // class-extractor's qualifier into the enclosing-owner walk so a nested
+      // member resolves to its owner's *qualified* id (Outer.Inner) — matching
+      // the qualified class node id computed below. Gated on the flag, so the
+      // owner walk and its cache entry are byte-identical when the flag is off.
+      const getQualifiedOwnerName =
+        provider.classExtractor?.qualifiedNodeId === true
+          ? (node: SyntaxNode, simpleName: string): string | null =>
+              provider.classExtractor!.extractQualifiedName(node, simpleName)
+          : undefined;
       const enclosingClassInfo = needsOwner
         ? cachedFindEnclosingClassInfo(
             nameNode || definitionNodeForRange,
             file.path,
             provider.resolveEnclosingOwner,
+            getQualifiedOwnerName,
           )
         : null;
-      const enclosingClassId = enclosingClassInfo?.classId ?? null;
+      const enclosingClassId =
+        enclosingClassInfo?.qualifiedClassId ?? enclosingClassInfo?.classId ?? null;
       const objectLiteralOwnerInfo =
         !enclosingClassId && nodeLabel === 'Method' && definitionNode
           ? findObjectLiteralBindingInfo(definitionNode, file.path)
           : null;
 
+      // #1978: a class-like node opts into a fully-qualified node id (Outer.Inner)
+      // when the language enables qualifiedNodeId, so same-tail nested types in one
+      // file stay distinct. Hoisted ABOVE the node-id/qualifiedName use below and
+      // derived from the SAME extractQualifiedName the owner edge uses, so the
+      // member's owner id and the class node id agree. The order is load-bearing.
+      const classNodeForSymbol = definitionNodeForRange || definitionNode || nameNode;
+      const qualifiedTypeName =
+        extractedClassSymbol?.qualifiedName ??
+        (classNodeForSymbol && provider.classExtractor?.isTypeDeclaration(classNodeForSymbol)
+          ? (provider.classExtractor.extractQualifiedName(classNodeForSymbol, nodeName) ?? nodeName)
+          : undefined);
+
       // Qualify method/property IDs with enclosing class name to avoid collisions
-      // e.g. "Method:animal.dart:Animal.speak" vs "Method:animal.dart:Dog.speak"
-      const qualifiedName = enclosingClassInfo
-        ? `${enclosingClassInfo.className}.${nodeName}`
-        : nodeName;
+      // e.g. "Method:animal.dart:Animal.speak" vs "Method:animal.dart:Dog.speak".
+      // Class-like nodes use their own fully-qualified path as the id key when the
+      // language enables qualifiedNodeId (#1978); everything else is unchanged.
+      const qualifiedName =
+        isClassLikeLabel &&
+        provider.classExtractor?.qualifiedNodeId === true &&
+        qualifiedTypeName !== undefined
+          ? qualifiedTypeName
+          : enclosingClassInfo
+            ? `${enclosingClassInfo.className}.${nodeName}`
+            : nodeName;
 
       // Extract method metadata for Function/Method/Constructor nodes BEFORE generating
       // the node ID — parameterCount is needed to disambiguate overloaded methods.
@@ -778,12 +815,6 @@ const processParsingSequential = async (
         nodeLabel,
         `${file.path}:${qualifiedName}${classTemplateTag}${arityTag}${constraintsTag}${parameterShapeTag}`,
       );
-      const classNodeForSymbol = definitionNodeForRange || definitionNode || nameNode;
-      const qualifiedTypeName =
-        extractedClassSymbol?.qualifiedName ??
-        (classNodeForSymbol && provider.classExtractor?.isTypeDeclaration(classNodeForSymbol)
-          ? (provider.classExtractor.extractQualifiedName(classNodeForSymbol, nodeName) ?? nodeName)
-          : undefined);
       const frameworkHint = definitionNode
         ? detectFrameworkFromAST(language, (definitionNode.text || '').slice(0, 300))
         : null;

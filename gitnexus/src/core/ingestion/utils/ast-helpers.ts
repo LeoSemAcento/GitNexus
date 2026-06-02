@@ -321,6 +321,15 @@ export function getLabelFromCaptures(
 export interface EnclosingClassInfo {
   classId: string; // e.g. "Class:animal.dart:Animal"
   className: string; // e.g. "Animal"
+  /**
+   * The owner node id keyed by the enclosing type's FULLY-QUALIFIED path
+   * (e.g. "Class:file:Outer.Inner"), present only when the language opts into
+   * `qualifiedNodeId` AND the enclosing type is actually nested (#1978).
+   * Consumers building HAS_METHOD/HAS_PROPERTY owner edges use this in
+   * preference to `classId` so the edge source matches the qualified class
+   * node id. When absent, `classId` (the simple-tail key) is unchanged.
+   */
+  qualifiedClassId?: string;
 }
 
 /** Walk up AST to find enclosing class/struct/interface/impl, return its ID and name.
@@ -345,6 +354,16 @@ export const findEnclosingClassInfo = (
   node: SyntaxNode,
   filePath: string,
   resolveEnclosingOwner?: (node: SyntaxNode) => SyntaxNode | null,
+  /**
+   * Optional (#1978): returns the enclosing type's fully-qualified name
+   * (e.g. "Outer.Inner") for a type-declaration container, or null. Callers
+   * pass `classExtractor.extractQualifiedName` ONLY when the language's
+   * `qualifiedNodeId` flag is on — so when omitted, behavior is byte-identical
+   * to before (qualifiedClassId stays undefined). Used by the standard
+   * class-container branch to compute `qualifiedClassId` from the SAME function
+   * the node-id is built from, guaranteeing owner-id == node-id by construction.
+   */
+  getQualifiedOwnerName?: (node: SyntaxNode, simpleName: string) => string | null,
 ): EnclosingClassInfo | null => {
   let current = node.parent;
   let iterations = 0;
@@ -485,9 +504,29 @@ export const findEnclosingClassInfo = (
           templateArguments !== undefined
             ? `${stripTemplateArguments(nameNode.text)}${templateArgumentsIdTag(templateArguments)}`
             : nameNode.text;
+        // #1978: when the language opts into qualified node ids, key the owner
+        // edge by the enclosing type's qualified path (e.g. "Outer.Inner") so it
+        // matches the qualified class node id. Derived from the SAME
+        // extractQualifiedName the node-id uses → agree by construction. Only set
+        // when actually nested (qualified !== simple); top-level types are
+        // unchanged. (Go receiver / Rust impl branches return earlier and are
+        // intentionally untouched here.)
+        const qualifiedOwnerName = getQualifiedOwnerName?.(current, nameNode.text);
+        const qualifiedClassId =
+          qualifiedOwnerName != null && qualifiedOwnerName !== nameNode.text
+            ? generateId(
+                label,
+                `${filePath}:${
+                  templateArguments !== undefined
+                    ? `${stripTemplateArguments(qualifiedOwnerName)}${templateArgumentsIdTag(templateArguments)}`
+                    : qualifiedOwnerName
+                }`,
+              )
+            : undefined;
         return {
           classId: generateId(label, `${filePath}:${classIdName}`),
           className: nameNode.text,
+          ...(qualifiedClassId !== undefined ? { qualifiedClassId } : {}),
         };
       }
     }

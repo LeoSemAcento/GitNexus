@@ -1508,3 +1508,56 @@ describe('Ruby cross-namespace tail collision — distinct nodes (issue #1975)',
     expect(hasMethod.some((e) => e.target === 'from_baz' && e.sourceLabel === 'Class')).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Inline module-nested same-tail collision — distinct nodes (issue #1978)
+//
+// `module Outer; class Inner; end; end` + `module Other; class Inner; end; end`
+// must own their methods through TWO distinct Class nodes (qn Outer.Inner vs
+// Other.Inner). On the pre-fix base both Inner classes merge into one
+// simple-keyed node and from_outer/from_other cross-wire (dangling:0 but wrong).
+// Asserts positive owner-identity by the resolved node's qualifiedName (R7).
+// (Distinct from the compact `Foo::Bar` collision block above, which #1977 fixed.)
+// ---------------------------------------------------------------------------
+
+describe('Ruby inline module-nested same-tail collision — distinct nodes (issue #1978)', () => {
+  let result: PipelineResult;
+
+  beforeAll(async () => {
+    result = await runPipelineFromRepo(path.join(FIXTURES, 'ruby-nested-tail-collision'), () => {});
+  }, 60000);
+
+  pit('owns from_outer / from_other through distinct Outer.Inner / Other.Inner nodes (R7)', () => {
+    expect(findDanglingEdges(result, ['HAS_METHOD'])).toEqual([]);
+    const hm = getRelationships(result, 'HAS_METHOD');
+    const ownerQn = (target: string) => {
+      const e = hm.find((x) => x.target === target);
+      expect(e, `HAS_METHOD -> ${target}`).toBeDefined();
+      return result.graph.getNode(e!.rel.sourceId)?.properties.qualifiedName;
+    };
+    expect(ownerQn('from_outer')).toBe('Outer.Inner');
+    expect(ownerQn('from_other')).toBe('Other.Inner');
+  });
+
+  // attr_accessor routes through the property-registration pre-pass — a SEPARATE
+  // code path from `def` methods: call-processor.ts (sequential/legacy) and the
+  // parse-worker `kind === 'properties'` block (worker). Under qualifiedNodeId the
+  // owner must resolve to the QUALIFIED class node (Shapes.Circle); the pre-fix
+  // simple `Class:f.rb:Circle` no longer exists and would dangle. Exercised here
+  // on an UNAMBIGUOUS nested class (no same-tail sibling) so the assertion is
+  // exact on both legs.
+  //
+  // NOTE: exact owner identity for a routed property under SAME-TAIL nested types
+  // (e.g. two `Inner` classes) is a separate resolution-side concern — the
+  // registry-primary `emitRubyMixinEdges` bridge resolves the owner by simple
+  // tail name (last-wins) and the worker path can emit a duplicate cross-wired
+  // edge. That is deferred to the #1978 resolution-side follow-up; the
+  // structure-phase HAS_METHOD ownership above is already exact on both legs.
+  pit('owns radius (attr_accessor) under the qualified Shapes.Circle node, no dangling (R7)', () => {
+    expect(findDanglingEdges(result, ['HAS_PROPERTY'])).toEqual([]);
+    const hp = getRelationships(result, 'HAS_PROPERTY');
+    const e = hp.find((x) => x.target === 'radius');
+    expect(e, 'HAS_PROPERTY -> radius').toBeDefined();
+    expect(result.graph.getNode(e!.rel.sourceId)?.properties.qualifiedName).toBe('Shapes.Circle');
+  });
+});

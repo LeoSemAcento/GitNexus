@@ -3733,12 +3733,16 @@ describe('C++ SFINAE filter — arity gate runs before constraint filter', () =>
 // ---------------------------------------------------------------------------
 // Out-of-line nested definitions — method ownership + collision (issue #1975)
 //
-// `struct Outer::Inner { ... }` (name = qualified_identifier) now materializes a
-// node keyed by the full scoped text, so its methods own through a real node.
-// Crucially, a same-tail type in another scope (Other::Inner) stays a DISTINCT
-// node — no merge, no method mis-attribution. (A redundant forward-decl node
-// `Inner` also exists; the pre-existing inline same-tail node collision is
-// tracked separately in #1978.)
+// `struct Outer::Inner { ... }` (name = qualified_identifier) and its in-class
+// forward declaration `struct Outer { struct Inner; }` are the SAME type. Once
+// qualified node ids are on (#1978), both key to one canonical node whose
+// qualifiedName is the normalized scope path `Outer.Inner` — so the forward
+// decl and the out-of-line definition correctly UNIFY instead of producing two
+// redundant nodes (the pre-#1978 base kept them separate). Crucially, a
+// same-tail type in another scope (`Other::Inner`) stays a DISTINCT node — no
+// merge, no method mis-attribution. Owner identity is asserted on the
+// qualifiedName + distinct node id (the real key), not the simple `name`
+// (which is just the tail `Inner` for both, by design).
 // ---------------------------------------------------------------------------
 
 describe('C++ out-of-line nested definitions — ownership + collision (issue #1975)', () => {
@@ -3760,8 +3764,100 @@ describe('C++ out-of-line nested definitions — ownership + collision (issue #1
     const other = hasMethod.find((e) => e.target === 'from_other');
     expect(outer).toBeDefined();
     expect(other).toBeDefined();
-    expect(outer!.source).toBe('Outer::Inner');
-    expect(other!.source).toBe('Other::Inner');
-    expect(outer!.source).not.toBe(other!.source);
+    const ownerQn = (e: typeof outer) =>
+      result.graph.getNode(e!.rel.sourceId)?.properties.qualifiedName;
+    expect(ownerQn(outer)).toBe('Outer.Inner');
+    expect(ownerQn(other)).toBe('Other.Inner');
+    expect(outer!.rel.sourceId).not.toBe(other!.rel.sourceId);
+    // Discriminator: with qualifiedNodeId ON the owner node id is keyed by the
+    // NORMALIZED dotted path (Struct:...:Outer.Inner); with the fix OFF the
+    // out-of-line node is keyed by the raw scoped text (...:Outer::Inner). The
+    // `qualifiedName` PROPERTY is normalized either way, so assert on the id to
+    // actually prove the fix is engaged (test-soundness, workflow finding #5).
+    expect(outer!.rel.sourceId).toContain('Outer.Inner');
+    expect(outer!.rel.sourceId).not.toContain('::');
+    expect(other!.rel.sourceId).not.toContain('::');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Inline nested same-tail collision — distinct qualified nodes (issue #1978)
+//
+// `struct Outer { struct Inner {...} }` + `struct Other { struct Inner {...} }`
+// must materialize TWO distinct Struct nodes (qn Outer.Inner vs Other.Inner),
+// each owning its own method/field. On the pre-fix base both Inner structs
+// merge into one simple-keyed node and the methods cross-wire (dangling:0 but
+// wrong). Asserts positive owner-identity via the resolved node's qualifiedName,
+// not just dangle-free (R7). Distinct from the #1977 out-of-line case above.
+// ---------------------------------------------------------------------------
+
+describe('C++ inline nested same-tail collision — distinct qualified nodes (issue #1978)', () => {
+  let result: PipelineResult;
+
+  beforeAll(async () => {
+    result = await runPipelineFromRepo(path.join(FIXTURES, 'cpp-nested-tail-collision'), () => {});
+  }, 60000);
+
+  it('materializes Outer.Inner and Other.Inner as two distinct Struct nodes', () => {
+    const qns = getNodesByLabelFull(result, 'Struct')
+      .map((n) => n.properties.qualifiedName)
+      .filter((q) => q === 'Outer.Inner' || q === 'Other.Inner')
+      .sort();
+    expect(qns).toEqual(['Other.Inner', 'Outer.Inner']);
+  });
+
+  it('owns from_outer / from_other through their OWN distinct node (positive identity, R7)', () => {
+    expect(findDanglingEdges(result, ['HAS_METHOD', 'HAS_PROPERTY'])).toEqual([]);
+    const hm = getRelationships(result, 'HAS_METHOD');
+    const ownerQn = (target: string) => {
+      const e = hm.find((x) => x.target === target);
+      expect(e, `HAS_METHOD -> ${target}`).toBeDefined();
+      return result.graph.getNode(e!.rel.sourceId)?.properties.qualifiedName;
+    };
+    expect(ownerQn('from_outer')).toBe('Outer.Inner');
+    expect(ownerQn('from_other')).toBe('Other.Inner');
+  });
+
+  it('owns outer_field under Outer.Inner (struct field via the main HAS_PROPERTY path)', () => {
+    const hp = getRelationships(result, 'HAS_PROPERTY');
+    const e = hp.find((x) => x.target === 'outer_field');
+    expect(e).toBeDefined();
+    expect(result.graph.getNode(e!.rel.sourceId)?.properties.qualifiedName).toBe('Outer.Inner');
+  });
+});
+
+// Same collision fixture, forced through the WORKER pool (parse-worker.ts) rather
+// than the sequential parsing-processor.ts. Production parses repos >= 15 files via
+// the pool, so the qualified node-id + owner-edge logic must hold on BOTH paths
+// (workflow finding #4: the #1978 fixtures otherwise only exercise the sequential
+// path). Asserts worker == sequential for the distinct-node + owner outcome.
+describe('C++ inline nested same-tail collision — worker path parity (issue #1978)', () => {
+  let result: PipelineResult;
+
+  beforeAll(async () => {
+    result = await runPipelineFromRepo(path.join(FIXTURES, 'cpp-nested-tail-collision'), () => {}, {
+      // Force the worker-pool gate low so the 1-file fixture engages the pool.
+      workerThresholdsForTest: { minFiles: 1, minBytes: 1 },
+      workerPoolSize: 2,
+    });
+  }, 120000);
+
+  it('genuinely used the worker pool (guards against silent sequential fallback)', () => {
+    expect(result.usedWorkerPool).toBe(true);
+  });
+
+  it('materializes two distinct Struct nodes and owns each method correctly (R7)', () => {
+    const qns = getNodesByLabelFull(result, 'Struct')
+      .map((n) => n.properties.qualifiedName)
+      .filter((q) => q === 'Outer.Inner' || q === 'Other.Inner')
+      .sort();
+    expect(qns).toEqual(['Other.Inner', 'Outer.Inner']);
+    expect(findDanglingEdges(result, ['HAS_METHOD', 'HAS_PROPERTY'])).toEqual([]);
+    const hm = getRelationships(result, 'HAS_METHOD');
+    const ownerQn = (target: string) =>
+      result.graph.getNode(hm.find((x) => x.target === target)!.rel.sourceId)?.properties
+        .qualifiedName;
+    expect(ownerQn('from_outer')).toBe('Outer.Inner');
+    expect(ownerQn('from_other')).toBe('Other.Inner');
   });
 });

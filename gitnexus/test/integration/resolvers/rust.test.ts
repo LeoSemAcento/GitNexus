@@ -2047,3 +2047,45 @@ describe('Rust scoped inherent impl — ownership + collision (issue #1975)', ()
     expect(fromA!.source).not.toBe(fromB!.source);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Inline mod-nested same-tail collision — distinct nodes (issue #1978)
+//
+// `mod outer { struct Inner; impl Inner }` + `mod other { struct Inner; impl Inner }`
+// must own their methods through TWO distinct nodes. On the pre-fix base both
+// `Inner` structs merge into one simple-keyed node and from_outer/from_other
+// cross-wire onto it (dangling:0 but wrong). Asserts the two methods resolve to
+// DISTINCT owner node ids (R7), not just dangle-free.
+//
+// DEFERRED (skip): the generic qualifiedNodeId mechanism (#1978) qualifies
+// class-like *type declarations* via the class-extractor. Rust methods live in
+// `impl Inner` blocks, and the inherent-impl owner branch in ast-helpers keys
+// the Impl node by the impl target's RAW text ("Inner") and returns BEFORE the
+// generic qualified-owner path — so it can't reuse `extractQualifiedName` (an
+// `impl_item` isn't a typeDeclaration). Qualifying the impl target by its
+// enclosing `mod` scope, plus matching it on the registry-primary graph bridge,
+// is separate machinery tracked as a follow-up. C++/Ruby land first (KTD-6).
+// ---------------------------------------------------------------------------
+
+// eslint-disable-next-line vitest/no-disabled-tests -- deferred follow-up (see above)
+describe.skip('Rust inline mod-nested same-tail collision — distinct nodes (issue #1978)', () => {
+  let result: PipelineResult;
+
+  beforeAll(async () => {
+    result = await runPipelineFromRepo(
+      path.join(FIXTURES, 'rust-nested-tail-collision'),
+      () => {},
+    );
+  }, 60000);
+
+  it('owns from_outer / from_other through distinct nodes (no merge, no mis-attribution)', () => {
+    expect(findDanglingEdges(result, ['HAS_METHOD'])).toEqual([]);
+    const hm = getRelationships(result, 'HAS_METHOD');
+    const a = hm.find((e) => e.target === 'from_outer');
+    const b = hm.find((e) => e.target === 'from_other');
+    expect(a).toBeDefined();
+    expect(b).toBeDefined();
+    // The two same-tail `Inner` methods must NOT share one owner node id.
+    expect(a!.rel.sourceId).not.toBe(b!.rel.sourceId);
+  });
+});
