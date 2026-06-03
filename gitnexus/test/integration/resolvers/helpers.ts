@@ -264,6 +264,14 @@ const LEGACY_RESOLVER_PARITY_EXPECTED_FAILURES: Readonly<Record<string, Readonly
     // to the new node-identity behavior.
     'owns from_outer / from_other through distinct Outer.Inner / Other.Inner nodes (R7)',
     'owns radius (attr_accessor) under the qualified Shapes.Circle node, no dangling (R7)',
+    // #1982 RESOLUTION-side same-tail owner identity. The registry-primary
+    // emitRubyMixinEdges bridge keys its owner map by full qualifiedName and the
+    // captures emit the full enclosing-scope owner; the legacy DAG does not use
+    // that bridge, so these are registry-primary-only by design.
+    'owns outer_attr / other_attr under their OWN qualified Inner node (same-tail attr_accessor, R7)',
+    'routes include OuterMix / OtherMix to their OWN qualified Inner owner (same-tail mixin, R7)',
+    'genuinely used the worker pool for the same-tail Ruby fixture',
+    'owns outer_attr / other_attr under their OWN qualified Inner node on the worker path (no duplicate, R7)',
   ]),
   swift: new Set<string>([
     // Swift scope-resolution achieves 77/77 baseline parity. The tests

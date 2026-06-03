@@ -12,6 +12,7 @@ import { recordRubyCacheHit, recordRubyCacheMiss } from './cache-stats.js';
 import { synthesizeRubyReceiverBinding, findEnclosingClassOrModule } from './receiver-binding.js';
 import { getTreeSitterBufferSize } from '../../constants.js';
 import { parseSourceSafe } from '../../../tree-sitter/safe-parse.js';
+import { splitQualifiedName } from '../../utils/qualified-name.js';
 
 const FUNCTION_NODE_TYPES = ['method', 'singleton_method'] as const;
 const HERITAGE_CALL_NAMES: ReadonlySet<string> = new Set(['include', 'extend', 'prepend']);
@@ -20,6 +21,30 @@ const ATTR_CALL_NAMES: ReadonlySet<string> = new Set([
   'attr_reader',
   'attr_writer',
 ]);
+
+/**
+ * Build the full `.`-joined qualified owner name for a heritage/attr call by
+ * walking ALL enclosing class/module ancestors (not just the immediate one),
+ * so a same-tail nested owner (`module Outer; class Inner`) is keyed by its
+ * full path `Outer.Inner` instead of the bare tail `Inner` — which otherwise
+ * collapses both same-tail owners onto one `__heritage__`/`__property__` marker
+ * key (last-wins) and cross-wires their mixin / attr_accessor edges (#1982).
+ * Handles the compact `class Outer::Inner` form (name is a `scope_resolution`)
+ * via the shared normalizer, so the marker owner byte-matches the resolution
+ * def's `qualifiedName`. Returns undefined when there is no enclosing class/module.
+ */
+function buildEnclosingQualifiedName(callNode: SyntaxNode): string | undefined {
+  const segments: string[] = [];
+  let current: SyntaxNode | null = callNode.parent;
+  while (current !== null) {
+    if (current.type === 'class' || current.type === 'module') {
+      const nameNode = current.childForFieldName('name');
+      if (nameNode !== null) segments.unshift(...splitQualifiedName(nameNode.text));
+    }
+    current = current.parent;
+  }
+  return segments.length > 0 ? segments.join('.') : undefined;
+}
 
 export function emitRubyScopeCaptures(
   sourceText: string,
@@ -144,8 +169,7 @@ export function emitRubyScopeCaptures(
       if (HERITAGE_CALL_NAMES.has(callName)) {
         const callNode = nodeIfType(nodeMap['@reference.call.free'], 'call');
         if (callNode !== null) {
-          const enclosing = findEnclosingClassOrModule(callNode);
-          const ownerName = enclosing?.childForFieldName('name')?.text;
+          const ownerName = buildEnclosingQualifiedName(callNode);
           if (ownerName) {
             const argList = callNode.childForFieldName('arguments');
             if (argList !== null) {
@@ -178,8 +202,7 @@ export function emitRubyScopeCaptures(
       if (ATTR_CALL_NAMES.has(callName)) {
         const callNode = nodeIfType(nodeMap['@reference.call.free'], 'call');
         if (callNode !== null) {
-          const enclosing = findEnclosingClassOrModule(callNode);
-          const ownerName = enclosing?.childForFieldName('name')?.text;
+          const ownerName = buildEnclosingQualifiedName(callNode);
           if (ownerName) {
             const argList = callNode.childForFieldName('arguments');
             if (argList !== null) {

@@ -1,10 +1,16 @@
+module OuterMix; end
+module OtherMix; end
 module Outer
   class Inner
+    include OuterMix
+    attr_accessor :outer_attr
     def from_outer; end
   end
 end
 module Other
   class Inner
+    include OtherMix
+    attr_accessor :other_attr
     def from_other; end
   end
 end

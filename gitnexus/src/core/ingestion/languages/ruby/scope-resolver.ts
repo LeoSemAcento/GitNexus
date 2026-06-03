@@ -23,8 +23,13 @@ function emitRubyMixinEdges(
       if (!isClassLike(def.type)) continue;
       const graphId = resolveDefGraphId(parsed.filePath, def, nodeLookup);
       if (graphId !== undefined) {
-        const simpleName = def.qualifiedName?.split('.').pop() ?? def.qualifiedName ?? '';
-        graphIdByName.set(simpleName, graphId);
+        // Key by the FULL qualified name (`Outer.Inner`), NOT the simple tail.
+        // Same-tail nested classes (`Outer::Inner` + `Other::Inner`) otherwise
+        // collapse onto one `Inner` key (last-wins) and cross-wire their mixin /
+        // attr_accessor owners (#1982). The `__heritage__`/`__property__` markers
+        // carry the full qualified owner name in lockstep (see ruby/captures.ts).
+        const fullName = def.qualifiedName ?? '';
+        if (fullName.length > 0) graphIdByName.set(fullName, graphId);
       }
     }
   }
