@@ -396,6 +396,7 @@ const processParsingSequential = async (
   astCache: ASTCache,
   scopeTreeCache: ASTCache | undefined,
   onFileProgress?: FileProgressCallback,
+  exportedTypeMap?: ExportedTypeMap,
 ) => {
   const parser = await loadParser();
   const total = files.length;
@@ -937,6 +938,21 @@ const processParsingSequential = async (
         qualifiedName: qualifiedTypeName,
       });
 
+      // #1983: populate the incremental ExportedTypeMap on the sequential path
+      // too. Without this, a no-worker run over a partially-warm cache silently
+      // drops the sequential-miss files' exported types: cache-hit chunks make
+      // `exportedTypeMap.size > 0`, which suppresses the end-of-loop
+      // `buildExportedTypeMapFromGraph` rebuild, but the sequential path never
+      // populated the map. Placed right after `symbolTable.add` so accumulate's
+      // `lookupExactAll` finds this node's own def — the node depends only on
+      // its own symbol, so per-node placement is order-safe (unlike the worker
+      // path's two-pass shape in `mergeChunkResults`). `graph.addNode` above is
+      // the sole node-creation site in this path, so this covers exactly the
+      // node set the full-graph rebuild would scan.
+      if (exportedTypeMap) {
+        accumulateExportedTypesFromParsedNode(exportedTypeMap, node, symbolTable);
+      }
+
       // ── HAS_METHOD / HAS_PROPERTY: link member to enclosing class ──
       const ownerIdForMemberEdge = enclosingClassId ?? objectLiteralOwnerInfo?.ownerId ?? null;
 
@@ -1111,7 +1127,9 @@ export const processParsing = async (
     return data;
   }
 
-  // Fallback: sequential parsing (no pre-extracted data)
+  // Fallback: sequential parsing (no pre-extracted data). Thread the
+  // exportedTypeMap so no-worker runs populate it during the chunk loop (#1983)
+  // — see the accumulate call in processParsingSequential.
   await processParsingSequential(
     graph,
     files,
@@ -1119,6 +1137,7 @@ export const processParsing = async (
     astCache,
     scopeTreeCache,
     reportProgress,
+    exportedTypeMap,
   );
   return null;
 };

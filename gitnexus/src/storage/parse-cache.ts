@@ -228,6 +228,14 @@ export const loadParseCacheChunk = async (
 };
 
 /**
+ * Cache directories already created this process. `persistParseCacheChunk` runs
+ * once per cache-miss chunk; without this guard every miss re-issues a redundant
+ * `mkdir` syscall (hundreds on a large cold repo) (#1983). Storage paths are
+ * process-scoped, so the Set stays bounded.
+ */
+const createdCacheDirs = new Set<string>();
+
+/**
  * Persist one chunk shard and avoid retaining it in RAM for the rest of the
  * run. Falls back to `cache.entries` when `storagePath` is unset (unit tests).
  */
@@ -238,7 +246,11 @@ export const persistParseCacheChunk = async (
 ): Promise<void> => {
   const slim = slimParseWorkerResultsForCache(chunkResults);
   if (cache.storagePath) {
-    await fs.mkdir(getCacheDirPath(cache.storagePath), { recursive: true });
+    const cacheDir = getCacheDirPath(cache.storagePath);
+    if (!createdCacheDirs.has(cacheDir)) {
+      await fs.mkdir(cacheDir, { recursive: true });
+      createdCacheDirs.add(cacheDir);
+    }
     const payload = JSON.stringify(slim, mapReplacer);
     await fs.writeFile(getCacheChunkPath(cache.storagePath, chunkHash), payload, 'utf-8');
     cache.onDiskKeys ??= new Set<string>();
@@ -335,6 +347,13 @@ export const saveParseCache = async (storagePath: string, cache: ParseCache): Pr
   await fs.mkdir(tmpDir, { recursive: true });
 
   const keys = [...cache.usedKeys].filter(isValidChunkCacheKey).sort();
+  // Track hashes whose shard was actually written/copied this save. A hash can
+  // be in `usedKeys` without a backing shard — its in-memory serialize threw, or
+  // its on-disk copy failed/was-absent (e.g. a worker-quarantined chunk added to
+  // usedKeys but never persisted). Writing such a hash into `index.keys` would
+  // make the next load reference a shard that doesn't exist (#1983). Build the
+  // index from what we persisted, not from the raw usedKeys snapshot.
+  const writtenKeys: string[] = [];
   for (const chunkHash of keys) {
     const chunkPath = path.join(tmpDir, `${chunkHash}.json`);
     const inMemory = cache.entries.get(chunkHash);
@@ -346,11 +365,13 @@ export const saveParseCache = async (storagePath: string, cache: ParseCache): Pr
         continue;
       }
       await fs.writeFile(chunkPath, payload, 'utf-8');
+      writtenKeys.push(chunkHash);
       continue;
     }
     const existingPath = getCacheChunkPath(storagePath, chunkHash);
     try {
       await fs.copyFile(existingPath, chunkPath);
+      writtenKeys.push(chunkHash);
     } catch {
       /* shard missing — skip; next run treats as cache miss */
     }
@@ -358,7 +379,7 @@ export const saveParseCache = async (storagePath: string, cache: ParseCache): Pr
 
   const index: ShardedParseCacheIndex = {
     version: cache.version,
-    keys,
+    keys: writtenKeys,
   };
   await fs.writeFile(path.join(tmpDir, CACHE_INDEX_FILENAME), JSON.stringify(index), 'utf-8');
 

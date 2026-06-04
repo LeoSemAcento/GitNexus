@@ -839,24 +839,36 @@ const processBatch = (
       // extractParsedFile directly — no tree-sitter involved.
       if (provider.emitScopeCaptures) {
         for (const file of langFiles) {
-          const parsedFile = extractParsedFile(
-            provider,
-            file.content,
-            file.path,
-            (message) => {
-              if (parentPort) {
-                parentPort.postMessage({ type: 'warning', message });
-              } else {
-                logger.warn(message);
-              }
-            },
-            undefined, // no cachedTree for standalone providers
-          );
+          // #1983: skip building the ParsedFile for registry-primary
+          // (scope-resolution) languages — the scope-resolution phase
+          // re-extracts from source on the main thread, so the worker copy is
+          // unused work + retained RAM. COBOL is a standalone provider that is
+          // in SCOPE_RESOLUTION_LANGUAGES; its graph nodes come from cobolPhase,
+          // not from this ParsedFile, so gating here is safe.
+          const parsedFile = isScopeResolutionLanguage(language)
+            ? undefined
+            : extractParsedFile(
+                provider,
+                file.content,
+                file.path,
+                (message) => {
+                  if (parentPort) {
+                    parentPort.postMessage({ type: 'warning', message });
+                  } else {
+                    logger.warn(message);
+                  }
+                },
+                undefined, // no cachedTree for standalone providers
+              );
           if (parsedFile !== undefined) {
             result.parsedFiles.push(parsedFile);
-            result.fileCount++;
-            onFileProcessed?.();
           }
+          // fileCount / progress fire per file regardless of whether a
+          // ParsedFile was produced — matching the tree-sitter branch (which
+          // increments fileCount outside the parsedFile gate). Otherwise gated
+          // COBOL files would vanish from worker progress counts.
+          result.fileCount++;
+          onFileProcessed?.();
         }
       }
       continue;

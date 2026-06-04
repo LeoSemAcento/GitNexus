@@ -64,7 +64,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { isDev, parseTruthyEnv } from '../utils/env.js';
+import { isDev } from '../utils/env.js';
 import { isVerboseIngestionEnabled } from '../utils/verbose.js';
 import {
   endTimer,
@@ -72,7 +72,7 @@ import {
   logDeferredProfile,
   startTimer,
 } from '../utils/deferred-resolution-profile.js';
-import { logHeapProbe } from '../utils/heap-probe.js';
+import { isDebugHeapEnabled, logHeapProbe } from '../utils/heap-probe.js';
 import { extractORMQueriesInline } from './orm-extraction.js';
 
 import { logger } from '../../logger.js';
@@ -476,10 +476,7 @@ export async function runChunkedParseAndResolve(
     // body, which re-read process.env on every iteration even though
     // the env can't change mid-run.
     const verboseThroughputLog = isDev || isVerboseIngestionEnabled();
-    const heapProbeEveryN =
-      parseTruthyEnv(process.env.GITNEXUS_DEBUG_HEAP) || isDeferredResolutionProfileEnabled()
-        ? 25
-        : 0;
+    const heapProbeEveryN = isDebugHeapEnabled() ? 25 : 0;
 
     for (let chunkIdx = 0; chunkIdx < numChunks; chunkIdx++) {
       if (heapProbeEveryN > 0 && chunkIdx > 0 && chunkIdx % heapProbeEveryN === 0) {
