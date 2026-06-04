@@ -96,8 +96,6 @@ import {
 import { extractTemplateArguments, templateArgumentsIdTag } from '../utils/template-arguments.js';
 import type { LanguageProvider } from '../language-provider.js';
 import type { ParsedFile } from 'gitnexus-shared';
-import { extractParsedFile, type ScopeCaptureSourceKind } from '../scope-extractor-bridge.js';
-import { isScopeResolutionLanguage } from '../scope-resolution/pipeline/migrated-languages.js';
 import { extractLaravelRoutes, type ExtractedRoute } from '../route-extractors/laravel.js';
 
 import { logger } from '../../logger.js';
@@ -835,38 +833,14 @@ const processBatch = (
     const queryString = provider.treeSitterQueries;
     if (!queryString) {
       // Standalone providers (regex-based, no tree-sitter) that implement
-      // emitScopeCaptures feed into the scope-resolution pipeline via
-      // extractParsedFile directly — no tree-sitter involved.
+      // emitScopeCaptures resolve via the scope-resolution pipeline, which
+      // re-extracts from source on the main thread.
       if (provider.emitScopeCaptures) {
-        for (const file of langFiles) {
-          // #1983: skip building the ParsedFile for registry-primary
-          // (scope-resolution) languages — the scope-resolution phase
-          // re-extracts from source on the main thread, so the worker copy is
-          // unused work + retained RAM. COBOL is a standalone provider that is
-          // in SCOPE_RESOLUTION_LANGUAGES; its graph nodes come from cobolPhase,
-          // not from this ParsedFile, so gating here is safe.
-          const parsedFile = isScopeResolutionLanguage(language)
-            ? undefined
-            : extractParsedFile(
-                provider,
-                file.content,
-                file.path,
-                (message) => {
-                  if (parentPort) {
-                    parentPort.postMessage({ type: 'warning', message });
-                  } else {
-                    logger.warn(message);
-                  }
-                },
-                undefined, // no cachedTree for standalone providers
-              );
-          if (parsedFile !== undefined) {
-            result.parsedFiles.push(parsedFile);
-          }
-          // fileCount / progress fire per file regardless of whether a
-          // ParsedFile was produced — matching the tree-sitter branch (which
-          // increments fileCount outside the parsedFile gate). Otherwise gated
-          // COBOL files would vanish from worker progress counts.
+        // The worker no longer builds `ParsedFile`s for standalone providers
+        // either — scope-resolution re-extracts on the main thread, and for
+        // standalone COBOL the graph nodes come from cobolPhase, not this
+        // artifact (#1983). Count one unit of progress per file, as before.
+        for (let i = 0; i < langFiles.length; i++) {
           result.fileCount++;
           onFileProcessed?.();
         }
@@ -1107,14 +1081,12 @@ const processFileGroup = (
 
     // Vue SFC preprocessing: extract <script> block content
     let parseContent = file.content;
-    let scopeSourceKind: ScopeCaptureSourceKind = 'full-file';
     let lineOffset = 0;
     let isVueSetup = false;
     if (language === SupportedLanguages.Vue) {
       const extracted = extractVueScript(file.content);
       if (!extracted) continue; // skip .vue files with no script block
       parseContent = extracted.scriptContent;
-      scopeSourceKind = 'pre-extracted-script';
       lineOffset = extracted.lineOffset;
       isVueSetup = extracted.isSetup;
     }
@@ -1154,28 +1126,11 @@ const processFileGroup = (
 
     const provider = getProvider(language);
 
-    // RFC #909 Ring 2: produce a `ParsedFile` for the new scope-based
-    // resolution pipeline. Skipped for registry-primary languages — the
-    // scope-resolution phase re-extracts from source on the main thread,
-    // which avoids retaining ~2× semantic model in RAM on huge repos (#1983).
-    let parsedFile: import('gitnexus-shared').ParsedFile | undefined;
-    if (!isScopeResolutionLanguage(language)) {
-      parsedFile = extractParsedFile(
-        provider,
-        parseContent,
-        file.path,
-        (message) => {
-          if (parentPort) {
-            parentPort.postMessage({ type: 'warning', message });
-          } else {
-            logger.warn(message);
-          }
-        },
-        tree,
-        scopeSourceKind,
-      );
-    }
-    if (parsedFile !== undefined) result.parsedFiles.push(parsedFile);
+    // The worker no longer builds a `ParsedFile` here. Scope-resolution
+    // re-extracts each file from source on the main thread (scope-resolution/
+    // pipeline/run.ts); the worker copy retained ~2× the semantic model in RAM
+    // on huge repos (#1983) and, with every language on the scope-resolution
+    // path, was consumed by no one. `result.parsedFiles` stays empty.
 
     // Build per-file type environment + constructor bindings in a single AST walk.
     // The legacy heritage pre-pass that seeded a file-local parentMap for
