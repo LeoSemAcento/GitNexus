@@ -20,6 +20,7 @@
 
 import type { NodeLabel, ParameterTypeClass } from 'gitnexus-shared';
 import type { KnowledgeGraph } from '../../../graph/types.js';
+import { isOverloadableCallable } from '../../utils/callable-labels.js';
 import { templateConstraintsIdTag } from '../../utils/template-arguments.js';
 import { parameterShapeIdTag } from '../../utils/method-props.js';
 
@@ -99,11 +100,7 @@ export function buildGraphNodeLookup(graph: KnowledgeGraph): GraphNodeLookup {
       // a parameter-types-suffixed key so resolveDefGraphId can find
       // the right overload by matching its def's parameterTypes.
       const pTypes = (props as { parameterTypes?: readonly string[] }).parameterTypes;
-      if (
-        pTypes !== undefined &&
-        pTypes.length > 0 &&
-        (node.label === 'Function' || node.label === 'Method')
-      ) {
+      if (pTypes !== undefined && pTypes.length > 0 && isOverloadableCallable(node.label)) {
         const pKey = qualifiedKey(
           props.filePath,
           node.label,
@@ -115,7 +112,7 @@ export function buildGraphNodeLookup(graph: KnowledgeGraph): GraphNodeLookup {
       const pClasses = (props as { parameterTypeClasses?: readonly ParameterTypeClass[] })
         .parameterTypeClasses;
       const shapeTag = parameterShapeIdTag(pTypes, pClasses);
-      if (shapeTag !== '' && (node.label === 'Function' || node.label === 'Method')) {
+      if (shapeTag !== '' && isOverloadableCallable(node.label)) {
         const shapeKey = qualifiedKey(props.filePath, node.label, `${keyQualified}${shapeTag}`);
         if (!lookup.has(shapeKey)) lookup.set(shapeKey, node.id);
       }
