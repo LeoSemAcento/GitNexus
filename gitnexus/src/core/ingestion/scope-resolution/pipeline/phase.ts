@@ -264,6 +264,18 @@ export const scopeResolutionPhase: PipelinePhase<ScopeResolutionOutput> = {
                     case 'analyzing types':
                       langRatio = 0.5;
                       break;
+                    case 'resolving inheritance':
+                      langRatio = 0.55;
+                      break;
+                    case 'building MRO':
+                      langRatio = 0.6;
+                      break;
+                    case 'building workspace index':
+                      langRatio = 0.62;
+                      break;
+                    case 'propagating types':
+                      langRatio = 0.65;
+                      break;
                     case 'resolving references':
                       langRatio = 0.7;
                       break;

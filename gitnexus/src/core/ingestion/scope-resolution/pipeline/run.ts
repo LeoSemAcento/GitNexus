@@ -222,6 +222,10 @@ function emitDetectedInterfaceImplementations(
 export type ScopeResolutionSubPhase =
   | 'extracting'
   | 'analyzing types'
+  | 'resolving inheritance'
+  | 'building MRO'
+  | 'building workspace index'
+  | 'propagating types'
   | 'resolving references'
   | 'linking symbols';
 
@@ -410,6 +414,9 @@ export function runScopeResolution(
         provider.mergeBindings(existing, incoming, scopeId),
     },
   });
+
+  // Progress: heritage analysis (leiden community detection for inheritance)
+  input.onProgress?.('resolving inheritance', files.length, files.length);
   const preEmittedInheritanceSites = preEmitInheritanceEdges(graph, finalized, nodeLookup);
   // Call-based heritage hook (e.g., Ruby include/extend/prepend) — emits
   // IMPLEMENTS edges that `preEmitInheritanceEdges` cannot produce because
@@ -430,6 +437,9 @@ export function runScopeResolution(
   // heritage hook are invisible and ACCESSES edges silently fail to emit.
   const postHeritageNodeLookup =
     provider.emitHeritageEdges !== undefined ? buildGraphNodeLookup(graph) : nodeLookup;
+
+  // Progress: MRO construction (method resolution order)
+  input.onProgress?.('building MRO', files.length, files.length);
   emitDetectedInterfaceImplementations(
     graph,
     parsedFiles,
@@ -461,6 +471,7 @@ export function runScopeResolution(
   // cannot carry. Must run AFTER `populateOwners` (so owned defs are
   // attributed correctly) and AFTER finalize (so module-scope
   // bindings are available).
+  input.onProgress?.('building workspace index', files.length, files.length);
   const workspaceIndex = buildWorkspaceResolutionIndex(parsedFiles);
 
   // Cross-file implicit-namespace visibility (C#). Must run before
@@ -490,6 +501,7 @@ export function runScopeResolution(
   // SCC-ordered pass's cost is observable (PR #1050 made this O(files)
   // with chain-follow per importer; quadratic regressions show up
   // here, not in finalize).
+  input.onProgress?.('propagating types', files.length, files.length);
   if (provider.propagatesReturnTypesAcrossImports !== false) {
     propagateImportedReturnTypes(parsedFiles, indexes, workspaceIndex);
   }
