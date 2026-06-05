@@ -14,7 +14,6 @@ import { pathToFileURL } from 'node:url';
 
 import { createKnowledgeGraph } from '../../src/core/graph/graph.js';
 import { runChunkedParseAndResolve } from '../../src/core/ingestion/pipeline-phases/parse-impl.js';
-import { buildExportedTypeMapFromGraph } from '../../src/core/ingestion/call-processor.js';
 import { computeChunkHash, fileContentHash } from '../../src/storage/parse-cache.js';
 import type { ParseWorkerResult } from '../../src/core/ingestion/workers/parse-worker.js';
 
@@ -52,37 +51,6 @@ const emptyWorkerResult = (filePath: string, name: string): ParseWorkerResult =>
   skippedLanguages: {},
   fileCount: 1,
 });
-
-// A cached chunk result carrying an exported, typed symbol — enough to make a
-// cache-hit replay push exportedTypeMap.size > 0, the precondition that
-// suppresses the full-graph rebuild and exposes the sequential-miss gap (#2038).
-const exportedTypedResult = (
-  filePath: string,
-  name: string,
-  returnType: string,
-): ParseWorkerResult => {
-  const id = `Function:${filePath}:${name}`;
-  return {
-    ...emptyWorkerResult(filePath, name),
-    nodes: [
-      {
-        id,
-        label: 'Function',
-        properties: {
-          name,
-          filePath,
-          startLine: 1,
-          endLine: 1,
-          language: 'typescript',
-          isExported: true,
-        },
-      },
-    ],
-    symbols: [
-      { filePath, name, nodeId: id, type: 'Function', returnType },
-    ] as ParseWorkerResult['symbols'],
-  };
-};
 
 const writeReadyWorker = (workerPath: string, markerPath: string): void => {
   fs.writeFileSync(
@@ -183,7 +151,6 @@ describe('parse-impl worker pool lazy startup', () => {
       Date.now(),
       () => {},
       {
-        workerThresholdsForTest: { minFiles: 1, minBytes: 1 },
         workerUrlForTest: pathToFileURL(workerPath),
         workerPoolSize: 1,
         parseCache,
@@ -223,7 +190,6 @@ describe('parse-impl worker pool lazy startup', () => {
       Date.now(),
       () => {},
       {
-        workerThresholdsForTest: { minFiles: 1, minBytes: 1 },
         workerUrlForTest: pathToFileURL(workerPath),
         workerPoolSize: 1,
         parseCache,
@@ -262,7 +228,6 @@ describe('parse-impl worker pool lazy startup', () => {
         Date.now(),
         () => {},
         {
-          workerThresholdsForTest: { minFiles: 1, minBytes: 1 },
           workerUrlForTest: pathToFileURL(workerPath),
           workerPoolSize: 1,
           // No flag: a total worker-startup failure always fails fast now.
@@ -275,7 +240,7 @@ describe('parse-impl worker pool lazy startup', () => {
     expect(Array.from(graph.nodes.values()).some((n) => n.properties.name === 'fatal')).toBe(false);
   });
 
-  it('parses sequentially when GITNEXUS_WORKER_POOL_SIZE=0 and no --workers flag (#1741)', async () => {
+  it('throws when GITNEXUS_WORKER_POOL_SIZE=0 and no --workers flag (sequential parsing removed)', async () => {
     const saved = process.env.GITNEXUS_WORKER_POOL_SIZE;
     process.env.GITNEXUS_WORKER_POOL_SIZE = '0';
     try {
@@ -286,31 +251,31 @@ describe('parse-impl worker pool lazy startup', () => {
       fs.writeFileSync(full, content);
 
       // A ready-worker double with a spawn marker — it must NOT be spawned,
-      // because env=0 routes to the sequential path before any pool is built.
+      // because the disabled-channel validation throws before any pool is built.
       const markerPath = path.join(tempDir, 'env0-worker.marker');
       const workerPath = path.join(tempDir, 'env0-ready-worker.js');
       writeReadyWorker(workerPath, markerPath);
 
       const graph = createKnowledgeGraph();
-      const result = await runChunkedParseAndResolve(
-        graph,
-        [{ path: rel, size: fs.statSync(full).size }],
-        [rel],
-        1,
-        repoDir,
-        Date.now(),
-        () => {},
-        {
-          workerThresholdsForTest: { minFiles: 1, minBytes: 1 },
-          workerUrlForTest: pathToFileURL(workerPath),
-          // No workerPoolSize option — the env var is the only sizing signal.
-        },
-      );
+      await expect(
+        runChunkedParseAndResolve(
+          graph,
+          [{ path: rel, size: fs.statSync(full).size }],
+          [rel],
+          1,
+          repoDir,
+          Date.now(),
+          () => {},
+          {
+            workerUrlForTest: pathToFileURL(workerPath),
+            // No workerPoolSize option — the ambient env=0 is the only signal.
+          },
+        ),
+      ).rejects.toThrow(/GITNEXUS_WORKER_POOL_SIZE=0/);
 
-      expect(result.usedWorkerPool).toBe(false); // env=0 → sequential, not a size-0 pool fail-fast
-      expect(fs.existsSync(markerPath)).toBe(false); // no worker ever spawned
-      // Sequential parsing still produced a complete graph for the file.
-      expect(Array.from(graph.nodes.values()).some((n) => n.properties.name === 'env0')).toBe(true);
+      // Sequential parsing was removed: env=0 is a hard error, not a silent
+      // sequential run. The validation throws before any pool is constructed.
+      expect(fs.existsSync(markerPath)).toBe(false);
     } finally {
       if (saved === undefined) delete process.env.GITNEXUS_WORKER_POOL_SIZE;
       else process.env.GITNEXUS_WORKER_POOL_SIZE = saved;
@@ -341,7 +306,6 @@ describe('parse-impl worker pool lazy startup', () => {
         Date.now(),
         () => {},
         {
-          workerThresholdsForTest: { minFiles: 1, minBytes: 1 },
           workerUrlForTest: pathToFileURL(workerPath),
           workerPoolSize: 1, // explicit --workers 1 must win over ambient env=0
         },
@@ -349,78 +313,6 @@ describe('parse-impl worker pool lazy startup', () => {
 
       expect(result.usedWorkerPool).toBe(true); // explicit flag wins; env=0 ignored
       expect(fs.existsSync(markerPath)).toBe(true); // worker was spawned
-    } finally {
-      if (saved === undefined) delete process.env.GITNEXUS_WORKER_POOL_SIZE;
-      else process.env.GITNEXUS_WORKER_POOL_SIZE = saved;
-    }
-  });
-
-  it('threads exportedTypeMap through the sequential path: a no-worker run over a partially-warm cache keeps the sequential-miss chunk exported types (#2038)', async () => {
-    const saved = process.env.GITNEXUS_WORKER_POOL_SIZE;
-    process.env.GITNEXUS_WORKER_POOL_SIZE = '0'; // force the no-worker (sequential) path
-    try {
-      // Chunk A — cache HIT, pre-seeded with an exported typed symbol so the
-      // replay makes exportedTypeMap.size > 0 and the size===0 rebuild is skipped.
-      const relA = 'src/a_hit.ts';
-      const contentA = 'export function aWidget(): number { return 2; }\n';
-      const fullA = path.join(repoDir, relA);
-      fs.mkdirSync(path.dirname(fullA), { recursive: true });
-      fs.writeFileSync(fullA, contentA);
-
-      // Chunk B — cache MISS, parsed sequentially for real; exported + typed.
-      const relB = 'src/b_miss.ts';
-      const contentB = 'export function bWidget(): number { return 1; }\n';
-      const fullB = path.join(repoDir, relB);
-      fs.writeFileSync(fullB, contentB);
-
-      const chunkHashA = computeChunkHash([
-        { filePath: relA, contentHash: fileContentHash(contentA) },
-      ]);
-      const parseCache = {
-        version: 'test',
-        entries: new Map<string, ParseWorkerResult[]>([
-          [chunkHashA, [exportedTypedResult(relA, 'aWidget', 'number')]],
-        ]),
-        usedKeys: new Set<string>(),
-      };
-
-      const graph = createKnowledgeGraph();
-      const result = await runChunkedParseAndResolve(
-        graph,
-        [
-          { path: relA, size: fs.statSync(fullA).size },
-          { path: relB, size: fs.statSync(fullB).size },
-        ],
-        [relA, relB],
-        2,
-        repoDir,
-        Date.now(),
-        () => {},
-        {
-          // 1-byte budget → each file is its own chunk, so A hits while B misses.
-          chunkByteBudget: 1,
-          parseCache,
-        },
-      );
-
-      expect(result.usedWorkerPool).toBe(false);
-      // Sanity: the cache-hit chunk populated the map — this is what makes
-      // size > 0 and suppresses the full-graph rebuild on the size===0 guard.
-      expect(result.exportedTypeMap.get(relA)?.get('aWidget')).toBe('number');
-      // Regression (#2038): the sequential-miss chunk's exported type must
-      // survive. Fails on pre-fix HEAD — the sequential path never populated
-      // exportedTypeMap, and the rebuild was skipped because the hit made size > 0.
-      expect(result.exportedTypeMap.get(relB)?.get('bWidget')).toBe('number');
-
-      // Differential oracle: the threaded map must match a fresh full-graph build
-      // (both directions for the entries under test) on the actual mixed path.
-      const oracle = buildExportedTypeMapFromGraph(graph, result.model.symbols);
-      expect(result.exportedTypeMap.get(relB)?.get('bWidget')).toBe(
-        oracle.get(relB)?.get('bWidget'),
-      );
-      expect(result.exportedTypeMap.get(relA)?.get('aWidget')).toBe(
-        oracle.get(relA)?.get('aWidget'),
-      );
     } finally {
       if (saved === undefined) delete process.env.GITNEXUS_WORKER_POOL_SIZE;
       else process.env.GITNEXUS_WORKER_POOL_SIZE = saved;

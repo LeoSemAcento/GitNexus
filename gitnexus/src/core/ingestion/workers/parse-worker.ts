@@ -1,4 +1,4 @@
-import { parentPort, threadId } from 'node:worker_threads';
+import { parentPort, threadId, workerData } from 'node:worker_threads';
 import Parser from 'tree-sitter';
 import JavaScript from 'tree-sitter-javascript';
 import TypeScript from 'tree-sitter-typescript';
@@ -93,13 +93,33 @@ import {
   buildCollisionGroups,
   parameterShapeIdTag,
 } from '../utils/method-props.js';
-import { extractTemplateArguments, templateArgumentsIdTag } from '../utils/template-arguments.js';
+import {
+  extractTemplateArguments,
+  templateArgumentsIdTag,
+  templateConstraintsIdTag,
+} from '../utils/template-arguments.js';
 import type { LanguageProvider } from '../language-provider.js';
 import type { ParsedFile } from 'gitnexus-shared';
+import { extractParsedFile, type ScopeCaptureSourceKind } from '../scope-extractor-bridge.js';
+import { persistParsedFileShardSync } from '../../../storage/parsedfile-store.js';
 import { extractLaravelRoutes, type ExtractedRoute } from '../route-extractors/laravel.js';
 
 import { logger } from '../../logger.js';
 export type { ExtractedRoute } from '../route-extractors/laravel.js';
+
+// ── ParsedFile store (#1983 parallel serialization) ─────────────────────────
+// Read ONCE at worker init from `workerData` (immutable for the run, inherited
+// by respawned workers via the pool's factory closure). When set, this worker
+// writes its own ParsedFile shards to disk at each job flush instead of
+// returning them over the MessageChannel — parallelizing serialization off the
+// main thread. `undefined` ⇒ return ParsedFiles in the result (no-store
+// fallback). `shardSeq` makes each shard name unique within this worker; global
+// uniqueness for the run rests on the process-monotonic `threadId` (never reused
+// across respawns) plus the per-run store clear on the main thread.
+const PARSED_FILE_STORE_STORAGE_PATH: string | undefined = (
+  workerData as { parsedFileStoreStoragePath?: string } | undefined
+)?.parsedFileStoreStoragePath;
+let shardSeq = 0;
 
 // ── Bootstrap-stage diagnostics (#1741) ────────────────────────────────────
 // When GITNEXUS_WORKER_BOOTSTRAP=1 (or --verbose sets GITNEXUS_VERBOSE), each
@@ -1081,12 +1101,14 @@ const processFileGroup = (
 
     // Vue SFC preprocessing: extract <script> block content
     let parseContent = file.content;
+    let scopeSourceKind: ScopeCaptureSourceKind = 'full-file';
     let lineOffset = 0;
     let isVueSetup = false;
     if (language === SupportedLanguages.Vue) {
       const extracted = extractVueScript(file.content);
       if (!extracted) continue; // skip .vue files with no script block
       parseContent = extracted.scriptContent;
+      scopeSourceKind = 'pre-extracted-script';
       lineOffset = extracted.lineOffset;
       isVueSetup = extracted.isSetup;
     }
@@ -1126,11 +1148,46 @@ const processFileGroup = (
 
     const provider = getProvider(language);
 
-    // The worker no longer builds a `ParsedFile` here. Scope-resolution
-    // re-extracts each file from source on the main thread (scope-resolution/
-    // pipeline/run.ts); the worker copy retained ~2× the semantic model in RAM
-    // on huge repos (#1983) and, with every language on the scope-resolution
-    // path, was consumed by no one. `result.parsedFiles` stays empty.
+    // Produce the `ParsedFile` for the scope-resolution pipeline HERE, reusing
+    // the tree we just parsed (no second tree-sitter parse). Scope-resolution
+    // consumes these via the disk-backed parsedfile-store instead of
+    // re-extracting each file from source on the main thread — which
+    // accumulated an unbounded native tree-sitter leak on huge repos (#1983;
+    // see parsedfile-store.ts). parse-impl flushes `result.parsedFiles` to disk
+    // per chunk and does NOT retain them in main-thread heap, so this no longer
+    // costs ~1× the semantic model in RAM during parse.
+    const parsedFile = extractParsedFile(
+      provider,
+      parseContent,
+      file.path,
+      (message) => {
+        if (parentPort) {
+          parentPort.postMessage({ type: 'warning', message });
+        } else {
+          logger.warn(message);
+        }
+      },
+      tree,
+      scopeSourceKind,
+    );
+    if (parsedFile !== undefined) {
+      // Capture-time side-channel (#1983): `extractParsedFile` just ran the
+      // provider's `emitScopeCaptures`, which (for C++) populated module-level
+      // maps as a SIDE EFFECT that is NOT on `parsedFile`'s scopes/defs. Snapshot
+      // that per-file state as plain data onto `ParsedFile.captureSideChannel`
+      // so the main thread can restore it (via `ScopeResolver.applyCaptureSideChannel`)
+      // WITHOUT a re-parse, after this ParsedFile crosses the worker boundary /
+      // disk store. Providers without capture-time side effects leave the hook
+      // undefined and this is a no-op. `undefined` return ⇒ no field added.
+      //
+      // `extractParsedFile` returns a frozen ParsedFile, so re-wrap (shallow
+      // copy — scopes/defs are carried by reference) to attach the field rather
+      // than mutate the frozen object.
+      const sideChannel = provider.collectCaptureSideChannel?.(file.path);
+      result.parsedFiles.push(
+        sideChannel !== undefined ? { ...parsedFile, captureSideChannel: sideChannel } : parsedFile,
+      );
+    }
 
     // Build per-file type environment + constructor bindings in a single AST walk.
     // The legacy heritage pre-pass that seeded a file-local parentMap for
@@ -1858,9 +1915,38 @@ const processFileGroup = (
         classTemplateArguments.length > 0
           ? templateArgumentsIdTag(classTemplateArguments)
           : '';
+      // SFINAE / `requires`-clause aware ID disambiguation (issue #1579).
+      // Function-template overloads with identical parameterTypes but
+      // mutually-exclusive constraints (e.g. `enable_if_t<is_integral_v<T>>`
+      // vs `enable_if_t<is_floating_point_v<T>>`) need distinct graph nodes
+      // so the constraint-filter step in `narrowOverloadCandidates` has two
+      // candidates to narrow between. Without this tag they collapse to a
+      // single Function node and the SFINAE call resolves to only one edge
+      // regardless of which overload's constraint holds. This mirrors the
+      // sequential `parsing-processor` path removed in #1983 — the worker is
+      // now the sole parse path, so it must stamp the constraint tag and the
+      // `templateConstraints` node property the resolver looks up by re-
+      // hashing the def's constraints (see graph-bridge ids.ts / node-lookup.ts).
+      let parsedTemplateConstraints: unknown = undefined;
+      let constraintsTag = '';
+      if (
+        (nodeLabel === 'Function' || nodeLabel === 'Method') &&
+        provider.extractTemplateConstraints !== undefined &&
+        definitionNode
+      ) {
+        try {
+          parsedTemplateConstraints = provider.extractTemplateConstraints(definitionNode);
+          if (parsedTemplateConstraints !== undefined) {
+            constraintsTag = templateConstraintsIdTag(parsedTemplateConstraints);
+          }
+        } catch {
+          parsedTemplateConstraints = undefined;
+          constraintsTag = '';
+        }
+      }
       const nodeId = generateId(
         nodeLabel,
-        `${file.path}:${qualifiedName}${classTemplateTag}${arityTag}${parameterShapeTag}`,
+        `${file.path}:${qualifiedName}${classTemplateTag}${arityTag}${parameterShapeTag}${constraintsTag}`,
       );
 
       const description = provider.descriptionExtractor?.(nodeLabel, nodeName, captureMap);
@@ -1980,6 +2066,9 @@ const processFileGroup = (
           ...(qualifiedTypeName !== undefined ? { qualifiedName: qualifiedTypeName } : {}),
           ...(classTemplateArguments !== undefined && classTemplateArguments.length > 0
             ? { templateArguments: classTemplateArguments }
+            : {}),
+          ...(parsedTemplateConstraints !== undefined
+            ? { templateConstraints: parsedTemplateConstraints }
             : {}),
           ...(frameworkHint
             ? {
@@ -2250,6 +2339,25 @@ parentPort!.on('message', (msg: WorkerIncomingMessage) => {
 
     // Flush: send accumulated results
     if (msg.type === 'flush') {
+      // #1983 parallel serialization: when a store path is configured, write
+      // this job's ParsedFiles to our own disk shard HERE (at the flush
+      // boundary, where `accumulated.parsedFiles` is complete) and drop them
+      // from the result so the main thread never deserializes/re-serializes
+      // them. Writing at flush — not per sub-batch — encodes the invariant
+      // "a shard is written iff its result is delivered": a worker that dies
+      // before flush wrote no shard, so the pool's job retry yields exactly
+      // one. `undefined` store path keeps ParsedFiles in the result (no-store
+      // fallback). The write is synchronous: blocking this dedicated worker
+      // thread protects the main thread and avoids threading async through the
+      // accumulate path; per-job write time is small vs the parse it follows.
+      if (PARSED_FILE_STORE_STORAGE_PATH && accumulated.parsedFiles.length > 0) {
+        persistParsedFileShardSync(
+          PARSED_FILE_STORE_STORAGE_PATH,
+          `w${threadId}-${shardSeq++}`,
+          accumulated.parsedFiles,
+        );
+        accumulated.parsedFiles = [];
+      }
       parentPort!.postMessage({ type: 'result', data: accumulated });
       // Reset for potential reuse
       accumulated = {

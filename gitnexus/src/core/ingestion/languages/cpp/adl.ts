@@ -379,6 +379,58 @@ export function markCppAdlSiteNoAdl(filePath: string, line: number, col: number)
   noAdlSites.add(siteKey(filePath, line, col));
 }
 
+/**
+ * Plain-data, JSON-serializable snapshot of the per-file ADL capture state
+ * (`argInfoBySite` entries for this file + `noAdlSites` keys for this file).
+ * Carried on `ParsedFile.captureSideChannel` across the worker→main boundary
+ * (#1983); the call-site key's `line:col` are stored per-entry so the full
+ * `filePath:line:col` key can be reconstructed without parsing.
+ */
+export interface CppAdlSideChannel {
+  /** Per-call-site arg info: `[line, col, args]` for sites in this file. */
+  readonly argInfoBySite: readonly [number, number, readonly CppAdlArgInfo[]][];
+  /** ADL-suppressed sites in this file: `[line, col]`. */
+  readonly noAdlSites: readonly [number, number][];
+}
+
+const SITE_KEY_RE = /^(.*):(\d+):(\d+)$/;
+
+/** Split a `filePath:line:col` site key, tolerating colons in the path. */
+function parseSiteKey(key: string): { filePath: string; line: number; col: number } | undefined {
+  const m = SITE_KEY_RE.exec(key);
+  if (m === null) return undefined;
+  return { filePath: m[1], line: Number(m[2]), col: Number(m[3]) };
+}
+
+/** Snapshot this file's ADL capture state for the worker→main side-channel. */
+export function collectCppAdlSideChannel(filePath: string): CppAdlSideChannel {
+  const args: [number, number, readonly CppAdlArgInfo[]][] = [];
+  for (const [key, value] of argInfoBySite) {
+    const parsed = parseSiteKey(key);
+    if (parsed !== undefined && parsed.filePath === filePath) {
+      args.push([parsed.line, parsed.col, value]);
+    }
+  }
+  const noAdl: [number, number][] = [];
+  for (const key of noAdlSites) {
+    const parsed = parseSiteKey(key);
+    if (parsed !== undefined && parsed.filePath === filePath) {
+      noAdl.push([parsed.line, parsed.col]);
+    }
+  }
+  return { argInfoBySite: args, noAdlSites: noAdl };
+}
+
+/** Restore this file's ADL capture state from the side-channel (no parse). */
+export function applyCppAdlSideChannel(filePath: string, data: CppAdlSideChannel): void {
+  for (const [line, col, value] of data.argInfoBySite) {
+    argInfoBySite.set(siteKey(filePath, line, col), value);
+  }
+  for (const [line, col] of data.noAdlSites) {
+    noAdlSites.add(siteKey(filePath, line, col));
+  }
+}
+
 /** Clear ADL state. Called from `cppScopeResolver.loadResolutionConfig`
  *  (alongside `clearFileLocalNames`) so all C++ resolver per-pipeline state is
  *  reset together at the start of each resolution pass. */

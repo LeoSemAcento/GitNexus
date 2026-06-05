@@ -95,6 +95,47 @@ export function isCppAnonymousNamespaceScope(scopeId: ScopeId): boolean {
   return anonymousNamespaceScopeIds.has(scopeId);
 }
 
+/**
+ * Plain-data, JSON-serializable snapshot of the per-file capture-time
+ * file-local-linkage state. Carried on `ParsedFile.captureSideChannel` across
+ * the worker→main boundary (#1983). The derived sets (`nonGloballyVisibleNodeIds`,
+ * `anonymousNamespaceScopeIds`) are recomputed by `populateCppNonGloballyVisible`
+ * / `populateCppAnonymousNamespaceScopes` during `populateOwners`, so only the
+ * two capture-time maps cross the boundary.
+ */
+export interface CppFileLocalSideChannel {
+  /** File-local symbol names (static / anonymous-namespace) in this file. */
+  readonly fileLocalNames: readonly string[];
+  /** Anonymous-namespace source-range keys recorded for this file. */
+  readonly anonymousNamespaceRanges: readonly string[];
+}
+
+/** Snapshot this file's file-local-linkage capture state for the side-channel. */
+export function collectCppFileLocalSideChannel(filePath: string): CppFileLocalSideChannel {
+  const names = fileLocalNames.get(filePath);
+  const anon = anonymousNamespaceRangesByFile.get(filePath);
+  return {
+    fileLocalNames: names === undefined ? [] : [...names],
+    anonymousNamespaceRanges: anon === undefined ? [] : [...anon],
+  };
+}
+
+/** Restore this file's file-local-linkage capture state from the side-channel. */
+export function applyCppFileLocalSideChannel(
+  filePath: string,
+  data: CppFileLocalSideChannel,
+): void {
+  for (const name of data.fileLocalNames) markFileLocal(filePath, name);
+  if (data.anonymousNamespaceRanges.length > 0) {
+    let set = anonymousNamespaceRangesByFile.get(filePath);
+    if (set === undefined) {
+      set = new Set();
+      anonymousNamespaceRangesByFile.set(filePath, set);
+    }
+    for (const r of data.anonymousNamespaceRanges) set.add(r);
+  }
+}
+
 /** Clear tracked file-local names (call at start of each resolution pass). */
 export function clearFileLocalNames(): void {
   fileLocalNames.clear();

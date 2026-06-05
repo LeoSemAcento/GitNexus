@@ -1,0 +1,236 @@
+import { describe, it, expect } from 'vitest';
+import { mkdtemp, rm, readdir, readFile } from 'fs/promises';
+import { tmpdir } from 'os';
+import path from 'path';
+import type { ParsedFile } from 'gitnexus-shared';
+import {
+  clearParsedFileStore,
+  persistParsedFileChunk,
+  persistParsedFileShardSync,
+  loadParsedFilesForPaths,
+  getParsedFileStoreDir,
+} from '../../src/storage/parsedfile-store.js';
+
+/**
+ * Build a minimal ParsedFile whose Scope carries `bindings` / `typeBindings`
+ * Maps — the round-trip's fidelity hinges on those Maps surviving JSON
+ * serialization (they would otherwise collapse to `{}`).
+ */
+const makeParsedFile = (filePath: string): ParsedFile =>
+  ({
+    filePath,
+    moduleScope: `${filePath}:module`,
+    parsedImports: [],
+    localDefs: [
+      { nodeId: `Function:${filePath}:fn`, filePath, type: 'Function', qualifiedName: 'fn' },
+    ],
+    referenceSites: [],
+    scopes: [
+      {
+        id: `${filePath}:module`,
+        parent: null,
+        kind: 'Module',
+        range: { startLine: 1, startCol: 0, endLine: 9, endCol: 0 },
+        filePath,
+        bindings: new Map([['fn', [{ defId: `Function:${filePath}:fn`, origin: 'local' }]]]),
+        ownedDefs: [],
+        imports: [],
+        typeBindings: new Map([['x', { name: 'int' }]]),
+      },
+    ],
+  }) as unknown as ParsedFile;
+
+describe('parsedfile-store', () => {
+  it('round-trips ParsedFiles (incl. Scope Maps) and filters by requested paths', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'pfstore-'));
+    try {
+      await persistParsedFileChunk(dir, 'chunk-0', [makeParsedFile('a.c'), makeParsedFile('b.c')]);
+      await persistParsedFileChunk(dir, 'chunk-1', [makeParsedFile('c.c')]);
+
+      // Filtering: only requested paths come back.
+      const loaded = await loadParsedFilesForPaths(dir, new Set(['a.c', 'c.c']));
+      expect([...loaded.keys()].sort()).toEqual(['a.c', 'c.c']);
+      expect(loaded.has('b.c')).toBe(false);
+
+      // Map fidelity: bindings / typeBindings survive as real Maps.
+      const a = loaded.get('a.c')!;
+      const scope = a.scopes[0];
+      expect(scope.bindings).toBeInstanceOf(Map);
+      expect(scope.bindings.get('fn')?.[0]?.defId).toBe('Function:a.c:fn');
+      expect(scope.typeBindings).toBeInstanceOf(Map);
+      expect((scope.typeBindings.get('x') as { name: string }).name).toBe('int');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('writes no shard for an empty chunk', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'pfstore-'));
+    try {
+      await persistParsedFileChunk(dir, 'chunk-empty', []);
+      let shardCount = 0;
+      try {
+        shardCount = (await readdir(getParsedFileStoreDir(dir))).length;
+      } catch {
+        shardCount = 0; // dir not created — also fine
+      }
+      expect(shardCount).toBe(0);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('clearParsedFileStore removes all shards (subsequent load is empty)', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'pfstore-'));
+    try {
+      await persistParsedFileChunk(dir, 'chunk-0', [makeParsedFile('a.c')]);
+      await clearParsedFileStore(dir);
+      const loaded = await loadParsedFilesForPaths(dir, new Set(['a.c']));
+      expect(loaded.size).toBe(0);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns empty map when the store is absent', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'pfstore-'));
+    try {
+      const loaded = await loadParsedFilesForPaths(dir, new Set(['a.c']));
+      expect(loaded.size).toBe(0);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  // #1983 parallel serialization: the sync worker writer and the async writer
+  // share one serialization core and MUST produce byte-identical shards (the
+  // loader's deep-equals masks byte drift, so assert raw bytes).
+  it('persistParsedFileShardSync writes byte-identical shards to the async writer', async () => {
+    const asyncDir = await mkdtemp(path.join(tmpdir(), 'pfstore-a-'));
+    const syncDir = await mkdtemp(path.join(tmpdir(), 'pfstore-s-'));
+    try {
+      const files = [makeParsedFile('a.c'), makeParsedFile('b.c')];
+      await persistParsedFileChunk(asyncDir, 'shard', files);
+      persistParsedFileShardSync(syncDir, 'shard', files);
+      const asyncBytes = await readFile(
+        path.join(getParsedFileStoreDir(asyncDir), 'shard.json'),
+        'utf-8',
+      );
+      const syncBytes = await readFile(
+        path.join(getParsedFileStoreDir(syncDir), 'shard.json'),
+        'utf-8',
+      );
+      expect(syncBytes).toBe(asyncBytes);
+    } finally {
+      await rm(asyncDir, { recursive: true, force: true });
+      await rm(syncDir, { recursive: true, force: true });
+    }
+  });
+
+  it('persistParsedFileShardSync round-trips through loadParsedFilesForPaths with Maps intact', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'pfstore-'));
+    try {
+      persistParsedFileShardSync(dir, 'w1-0', [makeParsedFile('a.c')]);
+      const loaded = await loadParsedFilesForPaths(dir, new Set(['a.c']));
+      const scope = loaded.get('a.c')!.scopes[0];
+      expect(scope.bindings).toBeInstanceOf(Map);
+      expect(scope.bindings.get('fn')?.[0]?.defId).toBe('Function:a.c:fn');
+      expect(scope.typeBindings).toBeInstanceOf(Map);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  // #1983 capture side-channel: a ParsedFile may carry a plain-data
+  // `captureSideChannel` (e.g. C++ ADL / namespace / two-phase marks the worker
+  // computed). It MUST survive the JSON store round-trip so the main thread can
+  // restore those module maps WITHOUT a re-parse. Plain objects/arrays only —
+  // no Maps/Sets — so the interning reviver passes them through unchanged.
+  it('round-trips a ParsedFile.captureSideChannel (plain data) through the store', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'pfstore-'));
+    try {
+      const sideChannel = {
+        adl: {
+          argInfoBySite: [
+            [
+              6,
+              4,
+              [
+                {
+                  simpleClassName: 'Event',
+                  templateSimpleClassName: '',
+                  templateNamespace: '',
+                  templateArgClassNames: [],
+                  templateArgNamespaces: [],
+                },
+              ],
+            ],
+          ],
+          noAdlSites: [[9, 2]],
+        },
+        inlineNamespaceRanges: ['1:0:3:1'],
+        fileLocal: {
+          fileLocalNames: ['helper'],
+          anonymousNamespaceRanges: ['4:0:6:1'],
+        },
+        twoPhase: {
+          dependentBases: [['Derived', [['Base', ['detail']]]]],
+          dependentPackBaseClasses: ['Mix'],
+        },
+      };
+      const pf = {
+        ...(makeParsedFile('app.cpp') as unknown as Record<string, unknown>),
+        captureSideChannel: sideChannel,
+      } as unknown as ParsedFile;
+
+      persistParsedFileShardSync(dir, 'w1-0', [pf]);
+      const loaded = await loadParsedFilesForPaths(dir, new Set(['app.cpp']));
+      const got = loaded.get('app.cpp')!;
+      // Deep-equal: the plain-data snapshot survives byte-for-byte (after JSON).
+      expect((got as { captureSideChannel?: unknown }).captureSideChannel).toEqual(sideChannel);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  // #1983 (Kotlin): the kotlin provider carries a self-describing companion-
+  // scope side-channel `{ kind: 'kotlin', companionScopes: ScopeId[] }`. It
+  // shares the single generic `captureSideChannel` field with C++, so confirm
+  // the (Set→array) plain-data shape survives the JSON store round-trip too.
+  it('round-trips a Kotlin ParsedFile.captureSideChannel through the store', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'pfstore-'));
+    try {
+      const sideChannel = {
+        kind: 'kotlin',
+        companionScopes: ['scope:Logger.companion', 'scope:Animal.companion'],
+      };
+      const pf = {
+        ...(makeParsedFile('App.kt') as unknown as Record<string, unknown>),
+        captureSideChannel: sideChannel,
+      } as unknown as ParsedFile;
+
+      persistParsedFileShardSync(dir, 'w1-0', [pf]);
+      const loaded = await loadParsedFilesForPaths(dir, new Set(['App.kt']));
+      const got = loaded.get('App.kt')!;
+      expect((got as { captureSideChannel?: unknown }).captureSideChannel).toEqual(sideChannel);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('persistParsedFileShardSync writes no shard and no directory for empty input', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'pfstore-'));
+    try {
+      persistParsedFileShardSync(dir, 'w1-0', []);
+      let entries: string[] = [];
+      try {
+        entries = await readdir(getParsedFileStoreDir(dir));
+      } catch {
+        entries = []; // store dir not created — the expected parity with the async writer
+      }
+      expect(entries).toHaveLength(0);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});

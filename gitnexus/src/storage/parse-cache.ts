@@ -154,13 +154,13 @@ export const computeChunkHash = (
 const MAP_TAG = '__$mapEntries$__';
 const SET_TAG = '__$setValues$__';
 
-const mapReplacer = (_key: string, value: unknown): unknown => {
+export const mapReplacer = (_key: string, value: unknown): unknown => {
   if (value instanceof Map) return { [MAP_TAG]: Array.from(value.entries()) };
   if (value instanceof Set) return { [SET_TAG]: Array.from(value.values()) };
   return value;
 };
 
-const mapReviver = (_key: string, value: unknown): unknown => {
+export const mapReviver = (_key: string, value: unknown): unknown => {
   if (value && typeof value === 'object') {
     const v = value as Record<string, unknown>;
     if (Array.isArray(v[MAP_TAG])) return new Map(v[MAP_TAG] as [unknown, unknown][]);

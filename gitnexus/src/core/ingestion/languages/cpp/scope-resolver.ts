@@ -30,6 +30,7 @@ import {
   isCppDependentBaseMember,
 } from './two-phase-lookup.js';
 import { populateCppAssociatedNamespaces, clearCppAdlState, pickCppAdlCandidates } from './adl.js';
+import { applyCppCaptureSideChannel } from './capture-side-channel.js';
 import {
   clearCppInlineNamespaces,
   populateCppInlineNamespaceScopes,
@@ -102,6 +103,24 @@ export const cppScopeResolver: ScopeResolver = {
 
   buildMro: (graph, parsedFiles, nodeLookup) =>
     buildMro(graph, parsedFiles, nodeLookup, defaultLinearize),
+
+  // Worker-boundary restore (see `ScopeResolver.applyCaptureSideChannel`).
+  // `emitCppScopeCaptures` records per-file ADL call-site arg shapes
+  // (`markCppAdlSiteArgs`/`markCppAdlSiteNoAdl`), inline-/anonymous-namespace
+  // ranges (`markCppInlineNamespaceRange`/`markCppAnonymousNamespaceRange`),
+  // dependent-base names (`markCppDependentBase`/`markCppDependentPackBase`),
+  // and file-local linkage (`markFileLocal`) into module-level maps as a SIDE
+  // EFFECT — none of it is serialized onto the returned ParsedFile's scopes/defs.
+  // On the worker path those marks are populated in the worker process and lost
+  // across the MessageChannel / disk store; the main thread reuses the
+  // serialized ParsedFile and skips `extractParsedFile`, so `populateOwners` +
+  // the ADL / two-phase-lookup passes would see empty maps and emit zero edges.
+  // The worker stashed a plain-data snapshot on `parsed.captureSideChannel` via
+  // `cppProvider.collectCaptureSideChannel`; this restores it into the module
+  // maps WITHOUT any tree-sitter re-parse (the #1983 fix — the old re-parse
+  // replay re-OOM'd huge `.h`/`.cpp` repos). The freshly-extracted leg never
+  // calls this — its marks were just populated in this process.
+  applyCaptureSideChannel: applyCppCaptureSideChannel,
 
   populateOwners: (parsed: ParsedFile) => {
     populateClassOwnedMembers(parsed);

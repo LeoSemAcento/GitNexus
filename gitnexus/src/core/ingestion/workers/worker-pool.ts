@@ -209,6 +209,17 @@ export interface WorkerPoolOptions {
    * code should leave this unset.
    */
   workerFactory?: (workerUrl: URL) => Worker;
+  /**
+   * Storage path for the disk-backed ParsedFile store (#1983 parallel
+   * serialization). When set, it is baked into every spawned worker's
+   * `workerData` so the worker writes its own ParsedFile shards to disk
+   * instead of returning them over the MessageChannel for the main thread to
+   * serialize. Immutable for the run; captured in the default factory closure
+   * so RESPAWNED workers inherit it automatically (all spawn sites reuse the
+   * same factory). `undefined` ⇒ workers fall back to returning ParsedFiles in
+   * the result (small-repo / no-storage path).
+   */
+  parsedFileStoreStoragePath?: string;
 }
 
 export class WorkerPoolDispatchError extends Error {
@@ -262,6 +273,23 @@ export class WorkerPoolInitializationError extends WorkerPoolDispatchError {
     this.name = 'WorkerPoolInitializationError';
     this.readinessFailures = readinessFailures;
     this.crashClass = crashClass;
+  }
+}
+
+/**
+ * Thrown when a caller asks GitNexus to parse without the worker pool —
+ * `--workers 0`, `GITNEXUS_WORKER_POOL_SIZE=0`, or `skipWorkers: true`.
+ *
+ * GitNexus no longer has a sequential parser: the worker pool (with its
+ * quarantine + respawn/recycle + circuit-breaker resilience) is the SOLE
+ * parse path. These channels used to select an in-process fallback; they are
+ * now hard configuration errors so the operator gets an actionable message
+ * instead of silently parsing through a (deleted) slower path.
+ */
+export class WorkerPoolDisabledError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'WorkerPoolDisabledError';
   }
 }
 
@@ -502,7 +530,7 @@ export function resolveWorkerPoolOptions(
  * The pool size requested via the `GITNEXUS_WORKER_POOL_SIZE` env var, or
  * `undefined` when unset, empty/whitespace, or invalid. Module-internal sizing
  * reader consumed by {@link resolveAutoPoolSize} (the env override) and
- * {@link workerPoolDisabledByEnv} (the sequential-routing gate). Reads only —
+ * {@link workerPoolDisabledByEnv} (the disabled-channel check). Reads only —
  * never mutates `process.env`. Empty/whitespace is treated as *unset* (falls
  * through to the auto formula), not as 0 — an empty assignment (`export
  * GITNEXUS_WORKER_POOL_SIZE=`) is an accident, not a request for zero workers;
@@ -515,12 +543,11 @@ function envWorkerPoolSize(): number | undefined {
 }
 
 /**
- * True when the operator explicitly disabled the worker pool via
- * `GITNEXUS_WORKER_POOL_SIZE=0` — the env-channel equivalent of `--workers 0`.
- * The parse phase's `shouldUseWorkers` gate consults this (only when no
- * explicit `--workers <N>` was passed) to route to sequential parsing instead
- * of constructing a useless size-0 pool that would fail fast on a phantom
- * crash (#1741). An explicit positive `--workers N` always wins.
+ * True when the operator set `GITNEXUS_WORKER_POOL_SIZE=0` — the env-channel
+ * equivalent of `--workers 0`. The parse phase consults this (only when no
+ * explicit `--workers <N>` was passed) and HARD-ERRORS: sequential parsing was
+ * removed, so a disabled pool is an actionable configuration error, not a
+ * silent fallback. An explicit positive `--workers N` always wins.
  */
 export function workerPoolDisabledByEnv(): boolean {
   return envWorkerPoolSize() === 0;
@@ -800,7 +827,18 @@ export const createWorkerPool = (
   // (see captureWorkerStderr) and attach to readiness-failure messages —
   // instead of the generic "did not report ready" that hid the real cause
   // in #1741. Test factories (workerFactory) are used verbatim.
-  const spawnWorker = options?.workerFactory ?? ((url: URL) => new Worker(url, { stderr: true }));
+  // Bake the (immutable) ParsedFile store path into the factory closure so it
+  // reaches EVERY spawned worker — including respawns, which reuse this same
+  // factory — via `workerData`, read once at worker init. The `(url) => Worker`
+  // signature is unchanged so the zero-arg test factories keep working.
+  const parsedFileStoreStoragePath = options?.parsedFileStoreStoragePath;
+  const spawnWorker =
+    options?.workerFactory ??
+    ((url: URL) =>
+      new Worker(url, {
+        stderr: true,
+        workerData: parsedFileStoreStoragePath ? { parsedFileStoreStoragePath } : undefined,
+      }));
   /** Spawn + wire stderr capture in one step (used by all spawn sites). */
   const spawnAndCapture = (url: URL): Worker => {
     const worker = spawnWorker(url);

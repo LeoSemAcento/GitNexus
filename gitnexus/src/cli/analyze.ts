@@ -474,8 +474,7 @@ async function ensureHeap(): Promise<boolean> {
       cliError(
         `  Analysis aborted in a native worker or native binding path.\n` +
           `  Try one of these recovery paths:\n` +
-          `    gitnexus analyze --workers 0\n` +
-          `    npm uninstall -g gitnexus && npm install -g gitnexus@latest\n` +
+          `    npm uninstall -g gitnexus && npm install -g gitnexus@latest (rebuilds native bindings)\n` +
           `    Use Node 22 LTS if you are on a newer non-LTS runtime.\n`,
         { recoveryHint: 'native-worker-abort' },
       );
@@ -599,7 +598,7 @@ export interface AnalyzeOptions {
   workerTimeout?: string;
   /** Control LadybugDB WAL auto-checkpoint threshold during analyze. */
   walCheckpointThreshold?: string;
-  /** Parse worker pool size; 0 disables workers (sequential fallback). */
+  /** Parse worker pool size (>=1); 0 is rejected (no sequential mode). */
   workers?: string;
   embeddingThreads?: string;
   embeddingBatchSize?: string;
@@ -794,10 +793,11 @@ const analyzeCommandImpl = async (
   let workerPoolSize: number | undefined;
   if (options.workers !== undefined) {
     const parsedWorkers = Number(options.workers);
-    if (!Number.isInteger(parsedWorkers) || parsedWorkers < 0) {
+    if (!Number.isInteger(parsedWorkers) || parsedWorkers < 1) {
       cliError(
-        '  --workers must be a non-negative integer. ' +
-          'Pass 0 to disable the worker pool (sequential fallback).\n',
+        '  --workers must be a positive integer (>= 1). ' +
+          'GitNexus parses through a worker pool only — there is no sequential ' +
+          'mode, so 0 is not allowed. Omit --workers for an auto-sized pool.\n',
       );
       process.exitCode = 1;
       return;

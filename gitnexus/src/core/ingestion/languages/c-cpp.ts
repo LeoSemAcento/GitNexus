@@ -62,6 +62,7 @@ import {
   cppBindingScopeFor,
   cppImportOwningScope,
   cppReceiverBinding,
+  collectCppCaptureSideChannel,
 } from './cpp/index.js';
 import { extractCppTemplateConstraints } from './cpp/constraint-extractor.js';
 
@@ -465,6 +466,11 @@ export const cppProvider = defineLanguage({
 
   // ── RFC #909 Ring 3: scope-based resolution hooks (RFC §5) ──────────
   emitScopeCaptures: emitCppScopeCaptures,
+  // Worker-side: snapshot the module-level capture marks `emitCppScopeCaptures`
+  // just populated for this file into plain data on `ParsedFile.captureSideChannel`,
+  // so the main thread can restore them via `applyCaptureSideChannel` WITHOUT a
+  // re-parse (#1983). See `cpp/capture-side-channel.ts`.
+  collectCaptureSideChannel: collectCppCaptureSideChannel,
   interpretImport: interpretCppImport,
   interpretTypeBinding: interpretCppTypeBinding,
   bindingScopeFor: cppBindingScopeFor,

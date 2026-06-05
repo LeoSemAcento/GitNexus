@@ -132,8 +132,8 @@ export interface AnalyzeOptions {
    * Worker pool size override, threaded from the CLI `--workers` flag.
    * Forwarded to `PipelineOptions.workerPoolSize` so the parse phase
    * sizes the pool without `analyzeCommand` mutating `process.env`.
-   * `0` disables the pool (sequential fallback); positive integer sets
-   * the count; `undefined` defers to the env / auto-formula fallback.
+   * Must be a positive integer — `0` hard-errors (sequential parsing was
+   * removed); `undefined` defers to the env / auto-formula fallback.
    */
   workerPoolSize?: number;
 }
