@@ -218,6 +218,30 @@ describe('parsedfile-store', () => {
     }
   });
 
+  // #1983 (C): the C provider carries a self-describing static-linkage side-
+  // channel `{ kind: 'c', staticNames: string[] }` (the file-local `static`
+  // function names the worker recorded). It shares the single generic
+  // `captureSideChannel` field with C++/Kotlin, so confirm the plain-data shape
+  // survives the JSON store round-trip too — without it, `static` functions
+  // leak into cross-file resolution on the worker-only parse path.
+  it('round-trips a C ParsedFile.captureSideChannel through the store', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'pfstore-'));
+    try {
+      const sideChannel = { kind: 'c', staticNames: ['compute', 'helper'] };
+      const pf = {
+        ...(makeParsedFile('local.c') as unknown as Record<string, unknown>),
+        captureSideChannel: sideChannel,
+      } as unknown as ParsedFile;
+
+      persistParsedFileShardSync(dir, 'w1-0', [pf]);
+      const loaded = await loadParsedFilesForPaths(dir, new Set(['local.c']));
+      const got = loaded.get('local.c')!;
+      expect((got as { captureSideChannel?: unknown }).captureSideChannel).toEqual(sideChannel);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it('persistParsedFileShardSync writes no shard and no directory for empty input', async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'pfstore-'));
     try {

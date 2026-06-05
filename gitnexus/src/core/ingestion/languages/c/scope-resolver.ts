@@ -7,6 +7,7 @@ import { cProvider } from '../c-cpp.js';
 import { cArityCompatibility, cMergeBindings, resolveCImportTarget } from './index.js';
 import { scanHeaderFiles } from './header-scan.js';
 import { expandCWildcardNames, isStaticName, clearStaticNames } from './static-linkage.js';
+import { applyCStaticLinkageSideChannel } from './capture-side-channel.js';
 
 /**
  * C `ScopeResolver` registered in `SCOPE_RESOLVERS` and consumed by
@@ -30,6 +31,23 @@ export const cScopeResolver: ScopeResolver = {
     clearStaticNames();
     return scanHeaderFiles(repoPath);
   },
+
+  // Worker-boundary restore (see `ScopeResolver.applyCaptureSideChannel`).
+  // `emitCScopeCaptures` records per-file `static`-linkage names
+  // (`markStaticName` → `staticNames`) as a SIDE EFFECT — that state is NOT
+  // serialized onto the returned ParsedFile's scopes/defs. On the worker path
+  // those marks are populated in the worker process and lost across the
+  // MessageChannel / disk store; the main thread reuses the serialized
+  // ParsedFile and skips `extractParsedFile`, so `isStaticName` (read by
+  // `isFileLocalDef` and `expandCWildcardNames`) sees an empty map and C
+  // `static` functions leak into cross-file global free-call resolution
+  // (false CALLS edges) and `#include` wildcard imports. The worker stashed a
+  // plain-data snapshot on `parsed.captureSideChannel` via
+  // `cProvider.collectCaptureSideChannel`; this restores it into the module
+  // map WITHOUT any tree-sitter re-parse (the #1983 fix). The
+  // freshly-extracted leg never calls this — its marks were just populated in
+  // this process. Runs BEFORE `populateOwners`.
+  applyCaptureSideChannel: applyCStaticLinkageSideChannel,
 
   resolveImportTarget: (targetRaw, fromFile, allFilePaths, resolutionConfig) => {
     // Augment allFilePaths with .h files discovered via loadResolutionConfig

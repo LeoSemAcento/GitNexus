@@ -26,7 +26,6 @@
  *     next analyze with a fresh pool gets another chance.
  */
 import { describe, expect, it, vi } from 'vitest';
-import { createASTCache } from '../../src/core/ingestion/ast-cache.js';
 import { processParsing } from '../../src/core/ingestion/parsing-processor.js';
 import type { WorkerPool } from '../../src/core/ingestion/workers/worker-pool.js';
 import { WorkerPoolDispatchError } from '../../src/core/ingestion/workers/worker-pool.js';
@@ -49,7 +48,6 @@ describe('processParsing — worker-pool error propagation (U20)', () => {
         graph,
         [{ path: 'src/a.ts', content: 'export function a() { return 1; }\n' }],
         createSymbolTable(),
-        createASTCache(),
         workerPool,
         () => {},
       ),
@@ -81,7 +79,6 @@ describe('processParsing — worker-pool error propagation (U20)', () => {
         { path: 'src/a.ts', content: 'export function a() { return 1; }\n' },
       ],
       createSymbolTable(),
-      createASTCache(),
       workerPool,
       () => {},
     );
@@ -129,7 +126,6 @@ describe('processParsing — worker-pool error propagation (U20)', () => {
         { path: 'src/a.ts', content: 'export function a() { return 1; }\n' },
       ],
       createSymbolTable(),
-      createASTCache(),
       workerPool,
       (_current, _total, detail) => {
         progressDetails.push(detail);

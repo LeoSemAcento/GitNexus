@@ -1,7 +1,6 @@
 import type { NodeLabel } from 'gitnexus-shared';
 import { KnowledgeGraph } from '../graph/types.js';
 import type { SymbolTableWriter } from './model/index.js';
-import { ASTCache } from './ast-cache.js';
 import { getLanguageFromFilename } from 'gitnexus-shared';
 
 import { accumulateExportedTypesFromParsedNode, type ExportedTypeMap } from './call-processor.js';
@@ -12,13 +11,10 @@ import { logger } from '../logger.js';
 import type {
   ParseWorkerResult,
   ParseWorkerInput,
-  ExtractedCall,
-  ExtractedAssignment,
   ExtractedRoute,
   ExtractedFetchCall,
   ExtractedDecoratorRoute,
   ExtractedToolDef,
-  FileConstructorBindings,
   FileScopeBindings,
   ExtractedORMQuery,
   FetchWrapperDef,
@@ -32,8 +28,6 @@ import type {
 export type FileProgressCallback = (current: number, total: number, filePath: string) => void;
 
 export interface WorkerExtractedData {
-  calls: ExtractedCall[];
-  assignments: ExtractedAssignment[];
   routes: ExtractedRoute[];
   fetchCalls: ExtractedFetchCall[];
   fetchWrapperDefs: FetchWrapperDef[];
@@ -43,7 +37,6 @@ export interface WorkerExtractedData {
   routerModuleAliases: ExtractedRouterModuleAlias[];
   toolDefs: ExtractedToolDef[];
   ormQueries: ExtractedORMQuery[];
-  constructorBindings: FileConstructorBindings[];
   fileScopeBindings: FileScopeBindings[];
   /**
    * Per-file `ParsedFile` artifacts from the new scope-based resolution
@@ -63,7 +56,7 @@ export interface WorkerExtractedData {
  * Merge a list of `ParseWorkerResult`s into the running graph + symbol
  * table state and produce the chunk-aggregated `WorkerExtractedData`.
  *
- * Extracted from `processParsingWithWorkers` so the same merge logic can
+ * Split out from the worker-parse path so the same merge logic can
  * be applied to both freshly-parsed worker output AND cached worker
  * output replayed during incremental analyze. Idempotent on the
  * accumulator fields (push-only); idempotent on graph if the caller
@@ -132,8 +125,6 @@ export const mergeChunkResults = (
   }
 
   return {
-    calls: [],
-    assignments: [],
     routes: allRoutes,
     fetchCalls: allFetchCalls,
     fetchWrapperDefs: allFetchWrapperDefs,
@@ -143,7 +134,6 @@ export const mergeChunkResults = (
     routerModuleAliases: allRouterModuleAliases,
     toolDefs: allToolDefs,
     ormQueries: allORMQueries,
-    constructorBindings: [],
     fileScopeBindings: fileScopeBindingsByFile,
     parsedFiles: allParsedFiles,
   };
@@ -152,7 +142,7 @@ export const mergeChunkResults = (
 /**
  * Dispatch a chunk's files to the worker pool and return the RAW per-worker
  * results, WITHOUT merging them into the graph. Split out from
- * {@link processParsingWithWorkers} so the parse loop can overlap one chunk's
+ * {@link processParsing} so the parse loop can overlap one chunk's
  * merge (main-thread, via {@link mergeChunkResults}) with the NEXT chunk's
  * worker parse — the merge is the only remaining serial main-thread step once
  * ParsedFile serialization moved into the workers (#worker-idle pipelining).
@@ -203,28 +193,6 @@ export const dispatchChunkParse = async (
   return chunkResults;
 };
 
-const processParsingWithWorkers = async (
-  graph: KnowledgeGraph,
-  files: { path: string; content: string }[],
-  symbolTable: SymbolTableWriter,
-  astCache: ASTCache,
-  workerPool: WorkerPool,
-  onFileProgress?: FileProgressCallback,
-  /**
-   * When provided, populated with the raw worker results before merging.
-   * Used by the incremental-indexing parse cache to capture the per-chunk
-   * worker output for caching across runs. The mutation happens in-place
-   * so the caller (parse-impl) can keep a reference. See
-   * `gitnexus/src/storage/parse-cache.ts`.
-   */
-  outRawResults?: ParseWorkerResult[],
-  exportedTypeMap?: ExportedTypeMap,
-): Promise<WorkerExtractedData> => {
-  void astCache; // worker path parses in worker threads; astCache is sequential-only
-  const chunkResults = await dispatchChunkParse(files, workerPool, onFileProgress, outRawResults);
-  return mergeChunkResults(graph, symbolTable, chunkResults, exportedTypeMap);
-};
-
 // ============================================================================
 // Public API
 // ============================================================================
@@ -241,7 +209,6 @@ export const processParsing = async (
   graph: KnowledgeGraph,
   files: { path: string; content: string }[],
   symbolTable: SymbolTableWriter,
-  astCache: ASTCache,
   workerPool: WorkerPool,
   onFileProgress?: FileProgressCallback,
   /**
@@ -267,16 +234,8 @@ export const processParsing = async (
   // per-chunk warn below; the chunk-cache write-guard in parse-impl.ts keeps the
   // chunk uncached so the next analyze retries with a fresh pool), and a full
   // pool failure propagates `WorkerPoolDispatchError` so the run errors out.
-  const data = await processParsingWithWorkers(
-    graph,
-    files,
-    symbolTable,
-    astCache,
-    workerPool,
-    reportProgress,
-    outRawResults,
-    exportedTypeMap,
-  );
+  const chunkResults = await dispatchChunkParse(files, workerPool, reportProgress, outRawResults);
+  const data = mergeChunkResults(graph, symbolTable, chunkResults, exportedTypeMap);
   // Session-scoped quarantine (worker-pool resilience Layer 3): surface any
   // files this pool has decided are unsafe for workers so the operator can see
   // what was skipped. The pool already filtered them out of dispatch; we only

@@ -53,6 +53,7 @@ import {
   cBindingScopeFor,
   cImportOwningScope,
   cReceiverBinding,
+  collectCStaticLinkageSideChannel,
 } from './c/index.js';
 import {
   emitCppScopeCaptures,
@@ -396,6 +397,15 @@ export const cProvider = defineLanguage({
 
   // ── RFC #909 Ring 3: scope-based resolution hooks (RFC §5) ──────────
   emitScopeCaptures: emitCScopeCaptures,
+  // Worker-side: snapshot the module-level `static`-linkage marks
+  // `emitCScopeCaptures` just populated for this file (`markStaticName` →
+  // `staticNames`) into plain data on `ParsedFile.captureSideChannel`, so the
+  // main thread can restore them via `applyCaptureSideChannel` WITHOUT a
+  // re-parse (#1983 — the worker is the sole parse path). Without this, C
+  // `static` functions look non-file-local on the main thread and leak into
+  // cross-file global free-call resolution / wildcard imports. See
+  // `c/capture-side-channel.ts`.
+  collectCaptureSideChannel: collectCStaticLinkageSideChannel,
   interpretImport: interpretCImport,
   interpretTypeBinding: interpretCTypeBinding,
   bindingScopeFor: cBindingScopeFor,

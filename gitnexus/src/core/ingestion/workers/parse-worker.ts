@@ -1172,8 +1172,10 @@ const processFileGroup = (
     );
     if (parsedFile !== undefined) {
       // Capture-time side-channel (#1983): `extractParsedFile` just ran the
-      // provider's `emitScopeCaptures`, which (for C++) populated module-level
-      // maps as a SIDE EFFECT that is NOT on `parsedFile`'s scopes/defs. Snapshot
+      // provider's `emitScopeCaptures`, which (for C++ ADL/namespace marks,
+      // C `static`-linkage names, and Kotlin companion scopes) populated
+      // module-level maps as a SIDE EFFECT that is NOT on `parsedFile`'s
+      // scopes/defs. Snapshot
       // that per-file state as plain data onto `ParsedFile.captureSideChannel`
       // so the main thread can restore it (via `ScopeResolver.applyCaptureSideChannel`)
       // WITHOUT a re-parse, after this ParsedFile crosses the worker boundary /

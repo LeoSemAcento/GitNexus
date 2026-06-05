@@ -20,7 +20,6 @@ import {
   processParsing,
   type WorkerExtractedData,
 } from '../../src/core/ingestion/parsing-processor.js';
-import { createASTCache } from '../../src/core/ingestion/ast-cache.js';
 import { createSemanticModel } from '../../src/core/ingestion/model/semantic-model.js';
 import { createKnowledgeGraph } from '../../src/core/graph/graph.js';
 import type { KnowledgeGraph } from '../../src/core/graph/types.js';
@@ -66,7 +65,6 @@ export const parseFilesWithWorkers = async (
       graph,
       files,
       model.symbols,
-      createASTCache(Math.max(files.length, 1)),
       pool,
       undefined,
       opts.outRawResults,

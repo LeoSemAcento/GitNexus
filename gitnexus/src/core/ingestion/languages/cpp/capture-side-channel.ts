@@ -48,6 +48,15 @@ import {
  * slice for one file. Carried opaquely on `ParsedFile.captureSideChannel`.
  */
 export interface CppCaptureSideChannel {
+  /**
+   * Discriminant tag — the single generic `ParsedFile.captureSideChannel`
+   * field is shared with C (`{ kind: 'c' }`) and Kotlin (`{ kind: 'kotlin' }`).
+   * `applyCppCaptureSideChannel` checks this first so a foreign-language
+   * payload reaching the C++ apply (or vice-versa) is cleanly ignored. In
+   * practice apply only runs for the matching provider (one language per file),
+   * but the tag makes it robust and consistent with the C/Kotlin snapshots.
+   */
+  readonly kind: 'cpp';
   readonly adl: CppAdlSideChannel;
   /** Inline-namespace source-range keys recorded for this file. */
   readonly inlineNamespaceRanges: readonly string[];
@@ -76,7 +85,7 @@ export function collectCppCaptureSideChannel(filePath: string): CppCaptureSideCh
     twoPhase.dependentPackBaseClasses.length === 0;
   if (isEmpty) return undefined;
 
-  return { adl, inlineNamespaceRanges, fileLocal, twoPhase };
+  return { kind: 'cpp', adl, inlineNamespaceRanges, fileLocal, twoPhase };
 }
 
 /**
@@ -89,6 +98,10 @@ export function collectCppCaptureSideChannel(filePath: string): CppCaptureSideCh
 export function applyCppCaptureSideChannel(parsed: ParsedFile): void {
   const data = parsed.captureSideChannel as CppCaptureSideChannel | undefined;
   if (data === undefined || data === null || typeof data !== 'object') return;
+  // Discriminant guard — the generic `captureSideChannel` field is shared
+  // with C (`{ kind: 'c' }`) and Kotlin (`{ kind: 'kotlin' }`); cleanly
+  // ignore a non-C++ payload rather than mis-applying it.
+  if (data.kind !== 'cpp') return;
   if (data.adl !== undefined) applyCppAdlSideChannel(parsed.filePath, data.adl);
   if (data.inlineNamespaceRanges !== undefined) {
     applyCppInlineNamespaceSideChannel(parsed.filePath, data.inlineNamespaceRanges);

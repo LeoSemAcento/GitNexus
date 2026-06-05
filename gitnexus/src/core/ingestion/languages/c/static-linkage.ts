@@ -29,6 +29,18 @@ export function isStaticName(filePath: string, name: string): boolean {
   return staticNames.get(filePath)?.has(name) ?? false;
 }
 
+/**
+ * Return the `static` (file-local) names recorded for the given file as a
+ * plain array (empty when none). Used to snapshot the per-file slice of the
+ * module-level `staticNames` map into `ParsedFile.captureSideChannel` so it
+ * survives the worker→main boundary (#1983 — the worker is the sole parse
+ * path). See `c/capture-side-channel.ts`.
+ */
+export function getStaticNamesForFile(filePath: string): string[] {
+  const names = staticNames.get(filePath);
+  return names === undefined ? [] : [...names];
+}
+
 /** Clear tracked static names (for testing). */
 export function clearStaticNames(): void {
   staticNames.clear();

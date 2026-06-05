@@ -102,9 +102,10 @@ export interface WorkerPool {
    *
    * Files in {@link WorkerPool.getQuarantinedPaths} are filtered out before
    * dispatch — they have already caused a worker death this pool lifetime and
-   * are not safe to re-attempt in workers. The caller is responsible for
-   * routing them (e.g. to sequential fallback); inspect the quarantine
-   * snapshot before and after each dispatch.
+   * are not safe to re-attempt in workers. They are dropped from the run (the
+   * sequential fallback that once re-parsed them was removed); inspect the
+   * quarantine snapshot before and after each dispatch to surface skipped files
+   * in diagnostics.
    */
   dispatch<TInput, TResult>(
     items: TInput[],
@@ -192,8 +193,8 @@ export interface WorkerPoolOptions {
    * Hard ceiling on total wall time the pool will spend retrying / splitting
    * any single job. Combined with `timeoutBackoffFactor`, this prevents
    * exponentially-growing retry waits from accumulating into multi-hour
-   * stalls before the pool finally surfaces the bad file to sequential
-   * fallback. Default 5x `subBatchIdleTimeoutMs`.
+   * stalls before the pool finally quarantines the bad file and proceeds
+   * without it. Default 5x `subBatchIdleTimeoutMs`.
    */
   maxCumulativeTimeoutMs?: number;
   /**
