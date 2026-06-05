@@ -39,8 +39,7 @@ Commands and gotchas live under **Repo reference** below and in **[CONTRIBUTING.
 ## Reference docs
 
 - **[ARCHITECTURE.md](ARCHITECTURE.md)**, **[CONTRIBUTING.md](CONTRIBUTING.md)**, **[GUARDRAILS.md](GUARDRAILS.md)**
-- **Call-resolution DAG (legacy path):** See ARCHITECTURE.md § Call-Resolution DAG. Typed 6-stage DAG inside the `parse` phase; language-specific behavior behind `inferImplicitReceiver` / `selectDispatch` hooks on `LanguageProvider`. Shared code in `gitnexus/src/core/ingestion/` must not name languages. Types: `gitnexus/src/core/ingestion/call-types.ts`.
-- **Scope-resolution pipeline (RFC #909 Ring 3):** See ARCHITECTURE.md § Scope-Resolution Pipeline. Replaces the legacy DAG for languages in `MIGRATED_LANGUAGES` (see `registry-primary-flag.ts`). A language plugs in by implementing `ScopeResolver` (`scope-resolution/contract/scope-resolver.ts`) and registering it in `SCOPE_RESOLVERS`. CI parity gate runs BOTH paths per migrated language on every PR.
+- **Call & inheritance resolution (RFC #909 Ring 3):** See ARCHITECTURE.md § Scope-Resolution Pipeline. All languages resolve calls and inheritance through the scope-resolution pipeline (`Registry.lookup`, `preEmitInheritanceEdges`, `emitHeritageEdges`, `buildMro` → `MethodDispatchIndex`). **Shared code in `gitnexus/src/core/ingestion/` must not name languages** — plug language behavior in via `LanguageProvider` / `ScopeResolver` hooks. A language plugs in by implementing `ScopeResolver` (`scope-resolution/contract/scope-resolver.ts`) and registering it in `SCOPE_RESOLVERS`. (The legacy call-resolution DAG + `@heritage` capture path were removed in RING4-1 #942.)
 - **Cursor:** `.cursor/index.mdc` (always-on); `.cursor/rules/*.mdc` (glob-scoped). Legacy `.cursorrules` deprecated.
 - **GitNexus:** skills in `.claude/skills/gitnexus/`; MCP rules in `gitnexus:start` block below.
 
@@ -77,7 +76,7 @@ commits, or posts.
 
 This project is indexed by GitNexus as **GitNexus** (26675 symbols, 35395 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
-> If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
+> Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
 
 ## Always Do
 

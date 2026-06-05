@@ -43,8 +43,11 @@ export const en = {
   'tool.noIndexed': 'GitNexus: No indexed repositories found. Run: gitnexus analyze',
   'tool.usage.query': 'Usage: gitnexus query <search_query>',
   'tool.usage.context': 'Usage: gitnexus context <symbol_name> [--uid <uid>] [--file <path>]',
-  'tool.usage.impact': 'Usage: gitnexus impact <symbol_name> [--direction upstream|downstream]',
+  'tool.usage.impact':
+    'Usage: gitnexus impact <symbol_name> [--uid <uid>] [--file <path>] [--kind <kind>] [--direction upstream|downstream]',
   'tool.usage.cypher': 'Usage: gitnexus cypher <cypher_query>',
+  'tool.warn.unknownKind':
+    "--kind '{{kind}}' is not a known symbol kind (e.g. Function, Class, Method); it will not narrow the result.",
   'tool.detectChanges.noChanges': 'No changes detected.',
   'tool.detectChanges.changesSummary': 'Changes: {{files}} files, {{symbols}} symbols',
   'tool.detectChanges.affectedProcesses': 'Affected processes: {{count}}',
@@ -186,7 +189,7 @@ export const en = {
   'help.option.clean.lbugSidecars': 'Clean quarantined LadybugDB missing-shadow WAL sidecars',
   'help.option.wiki.force': 'Force full regeneration even if up to date',
   'help.option.wiki.provider':
-    'LLM provider: openai, openrouter, azure, custom, cursor, claude, or codex (default: openai)',
+    'LLM provider: openai, openrouter, azure, custom, cursor, claude, codex, or opencode (default: openai)',
   'help.option.wiki.model': 'LLM model or Azure deployment name (default: minimax/minimax-m2.5)',
   'help.option.wiki.baseUrl':
     'LLM API base URL. Azure v1: https://{resource}.openai.azure.com/openai/v1',
@@ -213,6 +216,8 @@ export const en = {
   'help.option.repo.target': 'Target repository',
   'help.option.context.uid': 'Direct symbol UID (zero-ambiguity lookup)',
   'help.option.context.file': 'File path to disambiguate common names',
+  'help.option.impact.kind':
+    'Kind filter to disambiguate common names (e.g. Function, Class, Method)',
   'help.option.impact.direction': 'upstream (dependants) or downstream (dependencies)',
   'help.option.impact.depth': 'Max relationship depth (default: 3)',
   'help.option.impact.includeTests': 'Include test files in results',
